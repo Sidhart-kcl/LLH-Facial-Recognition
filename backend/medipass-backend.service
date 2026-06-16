@@ -1,0 +1,19 @@
+[Unit]
+Description=MediPass Backend Service
+After=network.target
+
+[Service]
+Type=simple
+User=medipass
+WorkingDirectory=/opt/medipass/backend
+Environment="PATH=/opt/medipass/backend/venv/bin"
+Environment="FLASK_ENV=production"
+Environment="FLASK_DEBUG=False"
+ExecStart=/opt/medipass/backend/venv/bin/python face_service.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

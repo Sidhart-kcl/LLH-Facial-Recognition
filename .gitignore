@@ -1,0 +1,27 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Project specific
+node_modules/
+venv/
+__pycache__/
+*.pyc
+dist/
+build/
+.pytest_cache/

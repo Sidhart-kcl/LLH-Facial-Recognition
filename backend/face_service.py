@@ -131,6 +131,7 @@ def list_patients():
         {k: v for k, v in p.items() if k != "face_embeddings"}  # Note: face_embeddings, not face_embedding
         for p in patients_list
     ]
+    return jsonify({"patients": safe})
 
 
 @app.route("/verify", methods=["POST"])

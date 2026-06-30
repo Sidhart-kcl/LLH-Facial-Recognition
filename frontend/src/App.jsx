@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import BookingFlow from "./BookingFlow";
+import { AdminDashboard } from "./AdminDashboard";
 
 const API = "http://localhost:5050";
 
@@ -18,7 +19,7 @@ const IconToken = () => <Icon d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l1
 const IconUser = () => <Icon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" />;
 
 export default function App() {
-  const [mode, setMode] = useState("menu"); // menu | booking | checkin
+  const [mode, setMode] = useState("menu"); // menu | booking | checkin | admin
 
   return (
     <>
@@ -27,6 +28,7 @@ export default function App() {
       {mode === "menu" && <MainMenu onSelectMode={setMode} />}
       {mode === "booking" && <BookingFlow onComplete={() => setMode("checkin")} />}
       {mode === "checkin" && <CheckInFlow onBack={() => setMode("menu")} />}
+      {mode === "admin" && <AdminDashboard onBack={() => setMode("menu")} />}
     </>
   );
 }
@@ -66,6 +68,18 @@ function MainMenu({ onSelectMode }) {
               <div className="option-text">
                 <h2>Check In</h2>
                 <p>Scan your face to retrieve your digital token</p>
+              </div>
+              <div className="option-arrow">→</div>
+            </button>
+
+            <button
+              className="menu-option admin"
+              onClick={() => onSelectMode("admin")}
+            >
+              <div className="option-icon">📊</div>
+              <div className="option-text">
+                <h2>Admin Dashboard</h2>
+                <p>Review appointments, registrations, and issued tokens</p>
               </div>
               <div className="option-arrow">→</div>
             </button>
@@ -437,6 +451,10 @@ const styles = `
 
   .menu-option.checkin {
     border-color: rgba(34, 197, 94, 0.3);
+  }
+
+  .menu-option.admin {
+    border-color: rgba(168, 85, 247, 0.3);
   }
 
   .option-icon {

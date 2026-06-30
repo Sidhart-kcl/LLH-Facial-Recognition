@@ -10,7 +10,7 @@ const IconRefresh = () => (
   </svg>
 );
 
-export function AdminDashboard() {
+export function AdminDashboard({ onBack }) {
   const [patients, setPatients] = useState([]);
   const [loading, setLoading] = useState(false);
   const [stats, setStats] = useState({
@@ -24,13 +24,14 @@ export function AdminDashboard() {
     try {
       const res = await fetch(`${API}/patients`);
       const data = await res.json();
-      setPatients(data.patients || []);
+      const nextPatients = data.patients || [];
+      setPatients(nextPatients);
 
       // Calculate stats
-      const registered = data.patients.filter(p => p.registered).length;
-      const tokenIssued = data.patients.filter(p => p.token_issued).length;
+      const registered = nextPatients.filter(p => p.registered).length;
+      const tokenIssued = nextPatients.filter(p => p.token_issued).length;
       setStats({
-        total: data.patients.length,
+        total: nextPatients.length,
         registered,
         tokenIssued,
       });
@@ -50,10 +51,15 @@ export function AdminDashboard() {
       <style>{dashboardStyles}</style>
 
       <div style={styles.header}>
-        <h1>MediPass Admin Dashboard</h1>
-        <button onClick={fetchPatients} disabled={loading} style={styles.refreshBtn}>
-          <IconRefresh /> {loading ? 'Loading...' : 'Refresh'}
-        </button>
+        <div style={styles.headerTitle}>
+          <button onClick={onBack} style={styles.backBtn}>← Back</button>
+          <h1>MediPass Admin Dashboard</h1>
+        </div>
+        <div style={styles.headerActions}>
+          <button onClick={fetchPatients} disabled={loading} style={styles.refreshBtn}>
+            <IconRefresh /> {loading ? 'Loading...' : 'Refresh'}
+          </button>
+        </div>
       </div>
 
       {/* Stats */}
@@ -101,13 +107,13 @@ export function AdminDashboard() {
                 </td>
                 <td>{p.name}</td>
                 <td>
-                  <small>{new Date(p.appointment_time).toLocaleString()}</small>
+                  <small>{p.appointment_time ? new Date(p.appointment_time).toLocaleString() : 'Not set'}</small>
                 </td>
-                <td>{p.doctor}</td>
+                <td>{p.doctor || 'Not set'}</td>
                 <td>{p.registered ? '✅' : '❌'}</td>
                 <td>{p.token_issued ? '✅' : '⏳'}</td>
                 <td>
-                  <code style={styles.tokenCode}>{p.digital_token}</code>
+                  <code style={styles.tokenCode}>{p.digital_token || 'Not issued'}</code>
                 </td>
               </tr>
             ))}
@@ -128,7 +134,27 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: '16px',
     marginBottom: '24px',
+  },
+  headerTitle: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '16px',
+  },
+  headerActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  backBtn: {
+    background: 'transparent',
+    border: '1px solid #1e293b',
+    color: '#64748b',
+    padding: '8px 12px',
+    borderRadius: '6px',
+    cursor: 'pointer',
+    fontSize: '12px',
   },
   refreshBtn: {
     display: 'flex',

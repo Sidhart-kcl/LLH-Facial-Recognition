@@ -17,6 +17,45 @@ from insightface.app import FaceAnalysis
 DB_PATH = os.path.join(os.path.dirname(__file__), "../db/patients.json")
 
 
+def is_embedding_vector(value) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, (int, float)) for item in value)
+    )
+
+
+def patient_embedding_vectors(patient: dict) -> list[list[float]]:
+    raw_embeddings = patient.get("face_embeddings")
+
+    if raw_embeddings is None:
+        raw_embeddings = patient.get("face_embedding")
+
+    if not raw_embeddings:
+        return []
+
+    if is_embedding_vector(raw_embeddings):
+        return [raw_embeddings]
+
+    vectors = []
+    if isinstance(raw_embeddings, list):
+        for item in raw_embeddings:
+            if is_embedding_vector(item):
+                vectors.append(item)
+            elif isinstance(item, dict) and is_embedding_vector(item.get("vector")):
+                vectors.append(item["vector"])
+
+    return vectors
+
+
+def append_patient_embedding(patient: dict, embedding: np.ndarray) -> int:
+    vectors = patient_embedding_vectors(patient)
+    vectors.append(embedding.tolist())
+    patient["face_embeddings"] = vectors
+    patient.pop("face_embedding", None)
+    return len(vectors)
+
+
 def get_embedding_from_image(image_path: str) -> np.ndarray | None:
     """Extract face embedding from an image file."""
     app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
@@ -54,13 +93,14 @@ def register_patient(patient_id: str, image_path: str):
     if embedding is None:
         return
 
-    patient["face_embedding"] = embedding.tolist()
+    embedding_count = append_patient_embedding(patient, embedding)
     patient["registered"] = True
 
     with open(DB_PATH, "w") as f:
         json.dump(db, f, indent=2)
 
     print(f"✅ Face embedding registered for {patient['name']}")
+    print(f"   Stored face samples: {embedding_count}")
     print(f"   Appointment: {patient['appointment_id']}")
     print(f"   Token ready: {patient['digital_token']}")
 

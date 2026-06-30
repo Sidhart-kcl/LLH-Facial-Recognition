@@ -59,6 +59,55 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
 
+def is_embedding_vector(value) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, (int, float)) for item in value)
+    )
+
+
+def patient_embedding_vectors(patient: dict) -> list[np.ndarray]:
+    """
+    Return all usable embeddings for a patient.
+
+    Supports the old format:
+      "face_embeddings": [0.1, 0.2, ...]
+
+    And the new format:
+      "face_embeddings": [[0.1, 0.2, ...], [0.3, 0.4, ...]]
+    """
+    raw_embeddings = patient.get("face_embeddings")
+
+    # Backward compatibility for older helper-script registrations.
+    if raw_embeddings is None:
+        raw_embeddings = patient.get("face_embedding")
+
+    if not raw_embeddings:
+        return []
+
+    if is_embedding_vector(raw_embeddings):
+        return [np.array(raw_embeddings, dtype=np.float32)]
+
+    vectors = []
+    if isinstance(raw_embeddings, list):
+        for item in raw_embeddings:
+            if is_embedding_vector(item):
+                vectors.append(np.array(item, dtype=np.float32))
+            elif isinstance(item, dict) and is_embedding_vector(item.get("vector")):
+                vectors.append(np.array(item["vector"], dtype=np.float32))
+
+    return vectors
+
+
+def append_patient_embedding(patient: dict, embedding: np.ndarray) -> int:
+    vectors = [vector.tolist() for vector in patient_embedding_vectors(patient)]
+    vectors.append(embedding.tolist())
+    patient["face_embeddings"] = vectors
+    patient.pop("face_embedding", None)
+    return len(vectors)
+
+
 def decode_image(b64_string: str) -> np.ndarray:
     """Decode base64 image string (with or without data URI prefix) to OpenCV mat."""
     if "," in b64_string:
@@ -95,22 +144,15 @@ def find_best_match(embedding, patients):
     best_score = 0.0
 
     for patient in patients:
-        if not patient.get("face_embeddings"):
-            continue
+        for stored in patient_embedding_vectors(patient):
+            if stored.shape != embedding.shape:
+                continue
 
-        stored = np.array(
-            patient["face_embeddings"],
-            dtype=np.float32
-        )
+            score = cosine_similarity(embedding, stored)
 
-        score = cosine_similarity(
-            embedding,
-            stored
-        )
-
-        if score > best_score:
-            best_score = score
-            best_patient = patient
+            if score > best_score:
+                best_score = score
+                best_patient = patient
 
     return best_patient, best_score
 
@@ -213,12 +255,16 @@ def register_face():
 
     for p in db["patients"]:
         if p["patient_id"] == patient_id:
-            p["face_embeddings"] = embedding.tolist()
+            embedding_count = append_patient_embedding(p, embedding)
             p["registered"] = True
             p["registered_at"] = datetime.utcnow().isoformat()
     save_db(db)
 
-    return jsonify({"success": True, "message": f"Face registered for {patient['name']}."})
+    return jsonify({
+        "success": True,
+        "message": f"Face registered for {patient['name']}.",
+        "embedding_count": embedding_count,
+    })
 
 
 @app.route("/book", methods=["POST"])
@@ -250,7 +296,7 @@ def book_appointment():
         "department": data["department"],
         "digital_token": token,
         "token_issued": False,
-        "face_embeddings": None,
+        "face_embeddings": [],
         "registered": False,
     }
 

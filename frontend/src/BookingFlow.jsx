@@ -283,7 +283,7 @@ function StepFaceCapture({ form, onNext, onBack }) {
 }
 
 // ── Step 3: Confirmation with Token ────────────────────────────────────────
-function StepConfirmation({ form, faceImage, onComplete }) {
+function StepConfirmation({ form, faceImage, onComplete, onRetry }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -365,7 +365,7 @@ function StepConfirmation({ form, faceImage, onComplete }) {
           <IconX />
           <h2>Something Went Wrong</h2>
           <p>{error}</p>
-          <button className="btn-primary" onClick={onComplete}>
+          <button className="btn-primary" onClick={onRetry}>
             Try Again
           </button>
         </div>
@@ -449,10 +449,16 @@ function StepConfirmation({ form, faceImage, onComplete }) {
 }
 
 // ── Main Booking Component ────────────────────────────────────────────────
-export default function BookingFlow() {
+export default function BookingFlow({ onComplete }) {
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState(null);
   const [faceImage, setFaceImage] = useState(null);
+
+  const resetFlow = () => {
+    setStep(1);
+    setFormData(null);
+    setFaceImage(null);
+  };
 
   return (
     <>
@@ -489,11 +495,10 @@ export default function BookingFlow() {
               form={formData}
               faceImage={faceImage}
               onComplete={() => {
-                // Reset or redirect
-                setStep(1);
-                setFormData(null);
-                setFaceImage(null);
+                resetFlow();
+                onComplete?.();
               }}
+              onRetry={resetFlow}
             />
           )}
         </main>

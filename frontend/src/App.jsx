@@ -25,8 +25,8 @@ export default function App() {
       <style>{styles}</style>
       
       {mode === "menu" && <MainMenu onSelectMode={setMode} />}
-      {mode === "booking" && <BookingFlow />}
-      {mode === "checkin" && <CheckInFlow />}
+      {mode === "booking" && <BookingFlow onComplete={() => setMode("checkin")} />}
+      {mode === "checkin" && <CheckInFlow onBack={() => setMode("menu")} />}
     </>
   );
 }
@@ -91,8 +91,8 @@ function MainMenu({ onSelectMode }) {
 }
 
 // ── Check-In Flow ──────────────────────────────────────────────────────────
-function CheckInFlow() {
-  const [phase, setPhase] = useState("idle");
+function CheckInFlow({ onBack }) {
+  const [phase, setPhase] = useState("intro");
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -128,14 +128,50 @@ function CheckInFlow() {
     setError(null);
   };
 
+  if (phase === "intro") {
+    return (
+      <CheckInStart
+        onBack={onBack}
+        onStart={() => {
+          setError(null);
+          setPhase("idle");
+        }}
+      />
+    );
+  }
+
   return (
     <>
       {phase === "success" && result ? (
-        <TokenCard result={result} onReset={reset} onBack={() => window.location.reload()} />
+        <TokenCard result={result} onReset={reset} onBack={() => setPhase("intro")} />
       ) : (
-        <CameraCheckIn onCapture={handleCapture} loading={loading} error={error} phase={phase} onReset={reset} onBack={() => window.location.reload()} />
+        <CameraCheckIn onCapture={handleCapture} loading={loading} error={error} phase={phase} onReset={reset} onBack={() => setPhase("intro")} />
       )}
     </>
+  );
+}
+
+function CheckInStart({ onBack, onStart }) {
+  return (
+    <div className="checkin-shell">
+      <header className="checkin-header">
+        <button className="back-btn" onClick={onBack}>← Back</button>
+        <h1>Check In</h1>
+      </header>
+
+      <main className="checkin-main">
+        <div className="checkin-card checkin-start-card">
+          <div className="checkin-start-icon">
+            <IconToken size={34} />
+          </div>
+          <h2>Retrieve Your Digital Token</h2>
+          <p>Start face verification when you are ready. Your token will appear after a successful match.</p>
+          <button className="btn-capture" onClick={onStart}>
+            <IconCamera /> Start Face Scan
+          </button>
+        </div>
+      </main>
+    </div>
   );
 }
 
@@ -516,6 +552,38 @@ const styles = `
     padding: 20px;
     width: 100%;
     max-width: 520px;
+  }
+
+  .checkin-start-card {
+    text-align: center;
+    padding: 32px;
+  }
+
+  .checkin-start-icon {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.24);
+    color: #38bdf8;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 20px;
+  }
+
+  .checkin-start-card h2 {
+    font-size: 22px;
+    color: #f8fafc;
+    margin-bottom: 8px;
+  }
+
+  .checkin-start-card p {
+    color: #64748b;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0 auto 24px;
+    max-width: 360px;
   }
 
   .video-frame {

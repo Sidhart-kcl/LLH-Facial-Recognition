@@ -28,6 +28,7 @@ DB_PATH = os.path.join(DB_DIR, "patients.json")
 CHECKIN_ATTEMPTS_PATH = os.path.join(DB_DIR, "checkin_attempts.json")
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 SIMILARITY_THRESHOLD = 0.45   # cosine similarity — tune as needed
+ANGLE_SAMPLE_LABELS = ("forward", "left", "right")
 os.makedirs(DB_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -45,6 +46,9 @@ CORS(app, origins=["http://localhost:5173"])
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def load_db():
+    if not os.path.exists(DB_PATH):
+        return {"patients": []}
+
     with open(DB_PATH, "r") as f:
         data = json.load(f)
         # Handle both formats: list or dict
@@ -117,6 +121,17 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
 
+def normalize_embedding(vector: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(vector)
+    if norm == 0:
+        return vector
+    return vector / norm
+
+
+def averaged_embedding(vectors: list[np.ndarray]) -> np.ndarray:
+    return normalize_embedding(np.mean(vectors, axis=0).astype(np.float32))
+
+
 def is_embedding_vector(value) -> bool:
     return (
         isinstance(value, list)
@@ -158,6 +173,46 @@ def patient_embedding_vectors(patient: dict) -> list[np.ndarray]:
     return vectors
 
 
+def patient_match_vectors(patient: dict) -> list[tuple[str, np.ndarray]]:
+    """
+    Build the candidate vectors used for check-in matching.
+
+    For the VGGFace2 demo layout, each patient has three real angle samples:
+    forward, left, and right. At check-in we compare against those three plus
+    four derived averages, giving seven comparison vectors for that patient.
+    """
+    raw_vectors = [
+        normalize_embedding(vector)
+        for vector in patient_embedding_vectors(patient)
+    ]
+
+    if len(raw_vectors) < 3:
+        return [
+            (f"sample_{index}", vector)
+            for index, vector in enumerate(raw_vectors, start=1)
+        ]
+
+    forward, left, right = raw_vectors[:3]
+    candidates = [
+        (ANGLE_SAMPLE_LABELS[0], forward),
+        (ANGLE_SAMPLE_LABELS[1], left),
+        (ANGLE_SAMPLE_LABELS[2], right),
+        ("forward_left_average", averaged_embedding([forward, left])),
+        ("forward_right_average", averaged_embedding([forward, right])),
+        ("left_right_average", averaged_embedding([left, right])),
+        ("all_angles_average", averaged_embedding([forward, left, right])),
+    ]
+
+    # Keep any extra manually-registered samples usable without changing the
+    # seven-vector behavior for the standard three-angle demo patients.
+    candidates.extend(
+        (f"extra_sample_{index}", vector)
+        for index, vector in enumerate(raw_vectors[3:], start=4)
+    )
+
+    return candidates
+
+
 def append_patient_embedding(patient: dict, embedding: np.ndarray) -> int:
     vectors = [vector.tolist() for vector in patient_embedding_vectors(patient)]
     vectors.append(embedding.tolist())
@@ -196,13 +251,14 @@ def extract_embedding(img):
 
 
 def find_best_match(embedding, patients):
-    """Return (best_patient, best_score) or (None, 0)."""
+    """Return (best_patient, best_score, match_label) or (None, 0, None)."""
 
     best_patient = None
     best_score = 0.0
+    best_match_label = None
 
     for patient in patients:
-        for stored in patient_embedding_vectors(patient):
+        for match_label, stored in patient_match_vectors(patient):
             if stored.shape != embedding.shape:
                 continue
 
@@ -211,8 +267,9 @@ def find_best_match(embedding, patients):
             if score > best_score:
                 best_score = score
                 best_patient = patient
+                best_match_label = match_label
 
-    return best_patient, best_score
+    return best_patient, best_score, best_match_label
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -279,7 +336,7 @@ def verify_face():
     db = load_db()
     # Handle both formats: list [] or dict with "patients" key
     patients_list = db if isinstance(db, list) else db.get("patients", [])
-    patient, score = find_best_match(embedding, patients_list)
+    patient, score, match_label = find_best_match(embedding, patients_list)
     confidence = round(score * 100, 1)
     if patient is None or score < SIMILARITY_THRESHOLD:
         log_checkin_attempt(
@@ -313,6 +370,8 @@ def verify_face():
     return jsonify({
         "success": True,
         "confidence": confidence,
+        "match_label": match_label,
+        "match_type": "derived_average" if match_label and "average" in match_label else "registered_sample",
         "token": patient["digital_token"],
         "patient": {
             "name": patient["name"],

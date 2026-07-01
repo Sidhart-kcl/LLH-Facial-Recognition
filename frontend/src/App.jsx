@@ -17,6 +17,7 @@ const IconCheck = () => <Icon d="M20 6L9 17l-5-5" />;
 const IconX = () => <Icon d="M18 6L6 18M6 6l12 12" />;
 const IconToken = () => <Icon d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />;
 const IconUser = () => <Icon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" />;
+const IconUpload = () => <Icon d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />;
 
 export default function App() {
   const [mode, setMode] = useState("menu"); // menu | booking | checkin | admin
@@ -194,12 +195,16 @@ function CameraCheckIn({ onCapture, loading, error, phase, onReset, onBack }) {
   const [streaming, setStreaming] = useState(false);
   const [camErr, setCamErr] = useState(null);
   const [countdown, setCountdown] = useState(null);
+  const [mode, setMode] = useState("camera");
+  const [uploadErr, setUploadErr] = useState(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
   useEffect(() => {
     let stream;
     (async () => {
+      if (mode !== "camera") return;
+
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           video: { width: 640, height: 480, facingMode: "user" },
@@ -213,7 +218,7 @@ function CameraCheckIn({ onCapture, loading, error, phase, onReset, onBack }) {
       }
     })();
     return () => stream?.getTracks().forEach(t => t.stop());
-  }, []);
+  }, [mode]);
 
   const capture = () => {
     if (!streaming) return;
@@ -234,6 +239,30 @@ function CameraCheckIn({ onCapture, loading, error, phase, onReset, onBack }) {
     }, 1000);
   };
 
+  const handleUpload = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    setUploadErr(null);
+
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setUploadErr("Please upload an image file.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const image = event.target?.result;
+      if (typeof image !== "string") {
+        setUploadErr("Could not read the selected image.");
+        return;
+      }
+      onCapture(image);
+    };
+    reader.onerror = () => setUploadErr("Could not read the selected image.");
+    reader.readAsDataURL(file);
+  };
+
   return (
     <div className="checkin-shell">
       <header className="checkin-header">
@@ -243,35 +272,70 @@ function CameraCheckIn({ onCapture, loading, error, phase, onReset, onBack }) {
 
       <main className="checkin-main">
         <div className="checkin-card">
-          {camErr ? (
-            <div className="cam-error">
-              <p>{camErr}</p>
-            </div>
-          ) : (
-            <>
-              <div className="video-frame">
-                <video ref={videoRef} autoPlay playsInline muted className="video-el" />
-                <div className="scan-overlay">
-                  <div className="scan-corner tl" /><div className="scan-corner tr" />
-                  <div className="scan-corner bl" /><div className="scan-corner br" />
-                  {countdown && <div className="countdown">{countdown}</div>}
-                </div>
+          <div className="checkin-tabs">
+            <button
+              className={`checkin-tab ${mode === "camera" ? "active" : ""}`}
+              onClick={() => setMode("camera")}
+              disabled={loading || countdown !== null}
+            >
+              <IconCamera /> Capture
+            </button>
+            <button
+              className={`checkin-tab ${mode === "upload" ? "active" : ""}`}
+              onClick={() => setMode("upload")}
+              disabled={loading || countdown !== null}
+            >
+              <IconUpload /> Upload
+            </button>
+          </div>
+
+          {mode === "camera" && (camErr ? (
+              <div className="cam-error">
+                <p>{camErr}</p>
               </div>
-              <canvas ref={canvasRef} style={{ display: "none" }} />
-              <button
-                className="btn-capture"
-                onClick={capture}
-                disabled={loading || !streaming || countdown !== null}
-              >
-                {loading ? (
-                  <><span className="spinner" /> Verifying…</>
-                ) : countdown ? (
-                  `Hold still… ${countdown}`
-                ) : (
-                  <>📸 Capture & Verify</>
-                )}
-              </button>
-              <p className="cam-hint">Position your face within the frame</p>
+            ) : (
+              <>
+                <div className="video-frame">
+                  <video ref={videoRef} autoPlay playsInline muted className="video-el" />
+                  <div className="scan-overlay">
+                    <div className="scan-corner tl" /><div className="scan-corner tr" />
+                    <div className="scan-corner bl" /><div className="scan-corner br" />
+                    {countdown && <div className="countdown">{countdown}</div>}
+                  </div>
+                </div>
+                <canvas ref={canvasRef} style={{ display: "none" }} />
+                <button
+                  className="btn-capture"
+                  onClick={capture}
+                  disabled={loading || !streaming || countdown !== null}
+                >
+                  {loading ? (
+                    <><span className="spinner" /> Verifying…</>
+                  ) : countdown ? (
+                    `Hold still… ${countdown}`
+                  ) : (
+                    <>📸 Capture & Verify</>
+                  )}
+                </button>
+                <p className="cam-hint">Position your face within the frame</p>
+              </>
+            ))}
+
+          {mode === "upload" && (
+            <>
+              <label className={`checkin-upload-box ${loading ? "disabled" : ""}`}>
+                {loading ? <span className="spinner" /> : <IconUpload />}
+                <span>{loading ? "Verifying image..." : "Choose a face image"}</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleUpload}
+                  disabled={loading}
+                  style={{ display: "none" }}
+                />
+              </label>
+              <p className="cam-hint">Use a clear image with one visible face</p>
+              {uploadErr && <div className="upload-error">{uploadErr}</div>}
             </>
           )}
 
@@ -344,6 +408,17 @@ function TokenCard({ result, onReset, onBack }) {
               <span>Recognition Confidence:</span>
               <span className="confidence-value">{result.confidence}%</span>
             </div>
+
+            {/* TEMP TESTING: remove this block when angle/average match debugging is done. */}
+            {result.match_label && (
+              <div className="match-debug">
+                <span>Testing match detail:</span>
+                <span className="match-debug-value">
+                  {result.match_label.replaceAll("_", " ")}
+                  {result.match_type ? ` (${result.match_type.replaceAll("_", " ")})` : ""}
+                </span>
+              </div>
+            )}
           </div>
 
           <button className="btn-reset" onClick={onReset}>Scan Another Face</button>
@@ -604,6 +679,39 @@ const styles = `
     max-width: 360px;
   }
 
+  .checkin-tabs {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .checkin-tab {
+    flex: 1;
+    padding: 10px 12px;
+    background: #1a2332;
+    border: 1px solid #1e293b;
+    border-radius: 10px;
+    color: #64748b;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .checkin-tab.active {
+    background: rgba(14, 165, 233, 0.15);
+    border-color: #38bdf8;
+    color: #38bdf8;
+  }
+
+  .checkin-tab:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   .video-frame {
     position: relative;
     border-radius: 14px;
@@ -693,6 +801,48 @@ const styles = `
     color: #475569;
     text-align: center;
     margin-top: 12px;
+  }
+
+  .checkin-upload-box {
+    min-height: 220px;
+    border: 2px dashed #1e293b;
+    border-radius: 14px;
+    background: #1a2332;
+    color: #cbd5e1;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    text-align: center;
+    transition: all 0.2s;
+  }
+
+  .checkin-upload-box:hover {
+    border-color: #38bdf8;
+    background: #0f1a2a;
+  }
+
+  .checkin-upload-box.disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .checkin-upload-box svg {
+    width: 42px;
+    height: 42px;
+    color: #38bdf8;
+  }
+
+  .upload-error {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    color: #fecaca;
+    font-size: 12px;
   }
 
   .cam-error {
@@ -825,6 +975,27 @@ const styles = `
     color: #22c55e;
     font-weight: 700;
     font-size: 14px;
+  }
+
+  /* TEMP TESTING: remove with the match_label block in CheckInResult. */
+  .match-debug {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px;
+    background: rgba(56, 189, 248, 0.1);
+    border: 1px dashed rgba(56, 189, 248, 0.35);
+    border-radius: 8px;
+    color: #93c5fd;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+
+  .match-debug-value {
+    color: #bfdbfe;
+    font-weight: 700;
+    text-align: right;
+    text-transform: capitalize;
   }
 
   .btn-reset {

@@ -233,10 +233,14 @@ def log_request():
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 cp /opt/medipass/backend/db/patients.json \
    /backup/medipass/patients_${TIMESTAMP}.json
+cp /opt/medipass/backend/db/checkin_attempts.json \
+   /backup/medipass/checkin_attempts_${TIMESTAMP}.json
 
 # Encrypt sensitive backups
 gpg --symmetric --cipher-algo AES256 \
     /backup/medipass/patients_${TIMESTAMP}.json
+gpg --symmetric --cipher-algo AES256 \
+    /backup/medipass/checkin_attempts_${TIMESTAMP}.json
 ```
 
 ---
@@ -460,8 +464,13 @@ For 5000+ patients, use indexed search:
 from sklearn.neighbors import NearestNeighbors
 import pickle
 
-# Pre-compute index
-embeddings = np.array([p["embedding"] for p in patients])
+# Pre-compute index over every registered face sample.
+records = []
+for patient in patients:
+    for embedding in patient.get("face_embeddings", []):
+        records.append((patient, embedding))
+
+embeddings = np.array([embedding for _, embedding in records])
 index = NearestNeighbors(n_neighbors=5, algorithm='kd_tree')
 index.fit(embeddings)
 
@@ -472,7 +481,7 @@ with open("embeddings_index.pkl", "wb") as f:
 # At verification time
 index = pickle.load(open("embeddings_index.pkl", "rb"))
 distances, indices = index.kneighbors([face_embedding])
-best_match = patients[indices[0][0]]
+best_match = records[indices[0][0]][0]
 ```
 
 ---

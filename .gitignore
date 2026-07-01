@@ -25,3 +25,7 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+
+# Local runtime database files
+backend/db/*.json
+backend/db/*.bak-*

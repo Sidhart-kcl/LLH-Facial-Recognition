@@ -23,9 +23,12 @@ from flask_cors import CORS
 from insightface.app import FaceAnalysis
 
 # ── Config ──────────────────────────────────────────────────────────────────
-DB_PATH = os.path.join(os.path.dirname(__file__), "db/patients.json")
+DB_DIR = os.path.join(os.path.dirname(__file__), "db")
+DB_PATH = os.path.join(DB_DIR, "patients.json")
+CHECKIN_ATTEMPTS_PATH = os.path.join(DB_DIR, "checkin_attempts.json")
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 SIMILARITY_THRESHOLD = 0.45   # cosine similarity — tune as needed
+os.makedirs(DB_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ── InsightFace init (loads once at startup) ─────────────────────────────────
@@ -53,6 +56,61 @@ def load_db():
 def save_db(db: dict):
     with open(DB_PATH, "w") as f:
         json.dump(db, f, indent=2)
+
+
+def load_checkin_attempts():
+    if not os.path.exists(CHECKIN_ATTEMPTS_PATH):
+        return {"attempts": []}
+
+    with open(CHECKIN_ATTEMPTS_PATH, "r") as f:
+        data = json.load(f)
+        if isinstance(data, list):
+            return {"attempts": data}
+        return data
+
+
+def save_checkin_attempts(attempts_db: dict):
+    with open(CHECKIN_ATTEMPTS_PATH, "w") as f:
+        json.dump(attempts_db, f, indent=2)
+
+
+def log_checkin_attempt(
+    *,
+    success: bool,
+    reason: str,
+    confidence: float | None = None,
+    patient: dict | None = None,
+    error: str | None = None,
+):
+    """Append one check-in attempt to a separate analytics log."""
+    try:
+        attempts_db = load_checkin_attempts()
+        attempts = attempts_db.setdefault("attempts", [])
+
+        attempt = {
+            "attempt_id": f"ATT-{uuid.uuid4().hex[:10].upper()}",
+            "timestamp": datetime.utcnow().isoformat(),
+            "success": success,
+            "reason": reason,
+            "confidence": confidence,
+            "threshold": SIMILARITY_THRESHOLD,
+        }
+
+        if patient:
+            attempt.update({
+                "patient_id": patient.get("patient_id"),
+                "appointment_id": patient.get("appointment_id"),
+                "doctor": patient.get("doctor"),
+                "department": patient.get("department"),
+            })
+
+        if error:
+            attempt["error"] = error
+
+        attempts.append(attempt)
+        save_checkin_attempts(attempts_db)
+    except Exception as exc:
+        print(f"⚠️  Failed to log check-in attempt: {exc}")
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -169,11 +227,24 @@ def list_patients():
     db = load_db()
     # Handle both formats
     patients_list = db if isinstance(db, list) else db.get("patients", [])
-    safe = [
-        {k: v for k, v in p.items() if k != "face_embeddings"}  # Note: face_embeddings, not face_embedding
-        for p in patients_list
-    ]
+    safe = []
+    for patient in patients_list:
+        safe_patient = {
+            k: v
+            for k, v in patient.items()
+            if k not in ("face_embeddings", "face_embedding")
+        }
+        face_embedding_count = len(patient_embedding_vectors(patient))
+        safe_patient["face_embedding_count"] = face_embedding_count
+        safe_patient["registered"] = face_embedding_count > 0
+        safe.append(safe_patient)
     return jsonify({"patients": safe})
+
+
+@app.route("/checkin-attempts", methods=["GET"])
+def list_checkin_attempts():
+    attempts_db = load_checkin_attempts()
+    return jsonify({"attempts": attempts_db.get("attempts", [])})
 
 
 @app.route("/verify", methods=["POST"])
@@ -185,12 +256,23 @@ def verify_face():
     """
     data = request.get_json(force=True)
     if not data or "image" not in data:
+        log_checkin_attempt(
+            success=False,
+            reason="missing_image",
+            error="No image provided.",
+        )
         return jsonify({"success": False, "error": "No image provided."}), 400
 
     # Decode & extract embedding
     img = decode_image(data["image"])
     embedding, err = extract_embedding(img)
     if err:
+        reason = "no_face" if err.startswith("No face detected") else "invalid_image"
+        log_checkin_attempt(
+            success=False,
+            reason=reason,
+            error=err,
+        )
         return jsonify({"success": False, "error": err}), 422
 
     # Match against DB
@@ -198,11 +280,19 @@ def verify_face():
     # Handle both formats: list [] or dict with "patients" key
     patients_list = db if isinstance(db, list) else db.get("patients", [])
     patient, score = find_best_match(embedding, patients_list)
+    confidence = round(score * 100, 1)
     if patient is None or score < SIMILARITY_THRESHOLD:
+        log_checkin_attempt(
+            success=False,
+            reason="below_threshold" if patient else "no_registered_embeddings",
+            confidence=confidence,
+            patient=patient,
+            error="Face not recognised. Please ensure you are registered or speak to reception.",
+        )
         return jsonify({
             "success": False,
             "error": "Face not recognised. Please ensure you are registered or speak to reception.",
-            "confidence": round(score * 100, 1),
+            "confidence": confidence,
         }), 404
 
     # Mark token as issued
@@ -213,10 +303,16 @@ def verify_face():
     save_db(db)
 
     appt_time = datetime.fromisoformat(patient["appointment_time"])
+    log_checkin_attempt(
+        success=True,
+        reason="matched",
+        confidence=confidence,
+        patient=patient,
+    )
 
     return jsonify({
         "success": True,
-        "confidence": round(score * 100, 1),
+        "confidence": confidence,
         "token": patient["digital_token"],
         "patient": {
             "name": patient["name"],
@@ -295,6 +391,7 @@ def book_appointment():
         "doctor": data["doctor"],
         "department": data["department"],
         "digital_token": token,
+        "created_at": datetime.utcnow().isoformat(),
         "token_issued": False,
         "face_embeddings": [],
         "registered": False,

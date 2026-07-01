@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 const API = 'http://localhost:5050';
+const MATCH_FAILURE_REASONS = new Set(['below_threshold', 'no_registered_embeddings']);
+const LOW_SUCCESS_CONFIDENCE = 55;
+const HIGH_FAILURE_CONFIDENCE = 40;
 
 const IconRefresh = () => (
   <svg width={16} height={16} viewBox="0 0 24 24" fill="none"
@@ -10,40 +13,249 @@ const IconRefresh = () => (
   </svg>
 );
 
-export function AdminDashboard({ onBack }) {
-  const [patients, setPatients] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [stats, setStats] = useState({
-    total: 0,
-    registered: 0,
-    tokenIssued: 0,
+const parseDate = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const isToday = (value) => {
+  const date = parseDate(value);
+  if (!date) return false;
+  const now = new Date();
+  return date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+};
+
+const average = (values) => {
+  const clean = values.filter(value => typeof value === 'number' && Number.isFinite(value));
+  if (clean.length === 0) return null;
+  return clean.reduce((sum, value) => sum + value, 0) / clean.length;
+};
+
+const formatPercent = (value) => (value === null ? 'No data' : `${value.toFixed(1)}%`);
+const formatNumber = (value) => (value === null ? 'No data' : value.toFixed(1));
+const formatReason = (reason) => reason ? reason.replaceAll('_', ' ') : 'unknown';
+const formatDateTime = (value) => {
+  const date = parseDate(value);
+  return date ? date.toLocaleString() : 'Not set';
+};
+
+const countBy = (items, keyFn) => {
+  const counts = new Map();
+  items.forEach((item) => {
+    const key = keyFn(item) || 'Unknown';
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  return Array.from(counts.entries())
+    .map(([label, value]) => ({ label, value }))
+    .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+};
+
+const checkinsByHour = (attempts) => {
+  const buckets = new Map();
+  attempts.forEach((attempt) => {
+    const date = parseDate(attempt.timestamp);
+    if (!date) return;
+    date.setMinutes(0, 0, 0);
+    const key = date.toISOString();
+    buckets.set(key, (buckets.get(key) || 0) + 1);
   });
 
-  const fetchPatients = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`${API}/patients`);
-      const data = await res.json();
-      const nextPatients = data.patients || [];
-      setPatients(nextPatients);
+  return Array.from(buckets.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(-12)
+    .map(([key, value]) => ({
+      label: new Date(key).toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+      }),
+      value,
+    }));
+};
 
-      // Calculate stats
-      const registered = nextPatients.filter(p => p.registered).length;
-      const tokenIssued = nextPatients.filter(p => p.token_issued).length;
-      setStats({
-        total: nextPatients.length,
-        registered,
-        tokenIssued,
-      });
+const departmentBreakdown = (patients, attempts) => {
+  const departments = new Map();
+
+  patients.forEach((patient) => {
+    const department = patient.department || 'Unknown';
+    const current = departments.get(department) || { label: department, appointments: 0, checkins: 0 };
+    current.appointments += 1;
+    departments.set(department, current);
+  });
+
+  attempts.forEach((attempt) => {
+    const department = attempt.department || 'Unknown';
+    const current = departments.get(department) || { label: department, appointments: 0, checkins: 0 };
+    current.checkins += 1;
+    departments.set(department, current);
+  });
+
+  return Array.from(departments.values())
+    .sort((a, b) => (b.appointments + b.checkins) - (a.appointments + a.checkins));
+};
+
+const repeatedFailures = (attempts) => {
+  const groups = new Map();
+
+  attempts
+    .filter(attempt => !attempt.success)
+    .forEach((attempt) => {
+      const key = attempt.patient_id || `Unmatched: ${formatReason(attempt.reason)}`;
+      const current = groups.get(key) || {
+        label: key,
+        count: 0,
+        lastAttempt: null,
+        confidences: [],
+        reasons: new Map(),
+      };
+
+      current.count += 1;
+      current.lastAttempt = attempt.timestamp;
+      if (typeof attempt.confidence === 'number') {
+        current.confidences.push(attempt.confidence);
+      }
+      current.reasons.set(attempt.reason, (current.reasons.get(attempt.reason) || 0) + 1);
+      groups.set(key, current);
+    });
+
+  return Array.from(groups.values())
+    .filter(group => group.count >= 2)
+    .map(group => {
+      const topReason = Array.from(group.reasons.entries())
+        .sort((a, b) => b[1] - a[1])[0]?.[0];
+      return {
+        ...group,
+        avgConfidence: average(group.confidences),
+        topReason,
+      };
+    })
+    .sort((a, b) => b.count - a.count);
+};
+
+const buildMetrics = (patients, attempts) => {
+  const registeredPatients = patients.filter(patient => (patient.face_embedding_count || 0) > 0);
+  const missingFacePatients = patients.filter(patient => (patient.face_embedding_count || 0) === 0);
+  const tokenIssued = patients.filter(patient => patient.token_issued).length;
+  const todayAttempts = attempts.filter(attempt => isToday(attempt.timestamp));
+  const successfulAttempts = attempts.filter(attempt => attempt.success);
+  const failedMatchAttempts = attempts.filter(attempt =>
+    !attempt.success
+    && typeof attempt.confidence === 'number'
+    && MATCH_FAILURE_REASONS.has(attempt.reason)
+  );
+  const failureReasons = countBy(attempts.filter(attempt => !attempt.success), attempt => attempt.reason);
+  const mostCommonFailure = failureReasons[0]?.label || null;
+
+  const bookedLeadDays = patients
+    .map((patient) => {
+      const created = parseDate(patient.created_at);
+      const appointment = parseDate(patient.appointment_time);
+      if (!created || !appointment) return null;
+      return (appointment.getTime() - created.getTime()) / 86400000;
+    })
+    .filter(value => typeof value === 'number' && Number.isFinite(value));
+
+  const riskyAttempts = attempts
+    .filter(attempt => typeof attempt.confidence === 'number')
+    .filter(attempt =>
+      (attempt.success && attempt.confidence < LOW_SUCCESS_CONFIDENCE)
+      || (!attempt.success && MATCH_FAILURE_REASONS.has(attempt.reason) && attempt.confidence >= HIGH_FAILURE_CONFIDENCE)
+    )
+    .sort((a, b) => (parseDate(b.timestamp)?.getTime() || 0) - (parseDate(a.timestamp)?.getTime() || 0))
+    .slice(0, 12);
+
+  return {
+    totalPatients: patients.length,
+    registeredPatients: registeredPatients.length,
+    tokenIssued,
+    todayCheckins: todayAttempts.length,
+    successRate: attempts.length ? (successfulAttempts.length / attempts.length) * 100 : null,
+    avgSuccessfulMatch: average(successfulAttempts.map(attempt => attempt.confidence)),
+    avgFailedMatch: average(failedMatchAttempts.map(attempt => attempt.confidence)),
+    mostCommonFailure,
+    missingFacePatients,
+    avgFaceSamples: average(registeredPatients.map(patient => patient.face_embedding_count || 0)),
+    avgDaysBookedAdvance: average(bookedLeadDays),
+    failureReasons,
+    checkinsOverTime: checkinsByHour(attempts),
+    departmentRows: departmentBreakdown(patients, attempts),
+    riskyAttempts,
+    repeatedFailures: repeatedFailures(attempts),
+  };
+};
+
+function StatCard({ label, value, detail }) {
+  return (
+    <div style={styles.statCard}>
+      <div style={styles.statLabel}>{label}</div>
+      <div style={styles.statValue}>{value}</div>
+      {detail && <div style={styles.statPercent}>{detail}</div>}
+    </div>
+  );
+}
+
+function EmptyState({ message = 'No data available yet.' }) {
+  return <div style={styles.emptyState}>{message}</div>;
+}
+
+function BarList({ rows, valueLabel = value => value }) {
+  if (!rows.length) return <EmptyState />;
+  const max = Math.max(...rows.map(row => row.value), 1);
+
+  return (
+    <div style={styles.barList}>
+      {rows.map(row => (
+        <div key={row.label} style={styles.barRow}>
+          <div style={styles.barMeta}>
+            <span>{row.label}</span>
+            <strong>{valueLabel(row.value)}</strong>
+          </div>
+          <div style={styles.barTrack}>
+            <div style={{ ...styles.barFill, width: `${Math.max((row.value / max) * 100, 4)}%` }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function AdminDashboard({ onBack }) {
+  const [patients, setPatients] = useState([]);
+  const [attempts, setAttempts] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const metrics = useMemo(() => buildMetrics(patients, attempts), [patients, attempts]);
+
+  const fetchDashboardData = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [patientsRes, attemptsRes] = await Promise.all([
+        fetch(`${API}/patients`),
+        fetch(`${API}/checkin-attempts`),
+      ]);
+
+      if (!patientsRes.ok) throw new Error('Failed to fetch patients');
+      if (!attemptsRes.ok) throw new Error('Failed to fetch check-in attempts');
+
+      const patientsData = await patientsRes.json();
+      const attemptsData = await attemptsRes.json();
+      setPatients(patientsData.patients || []);
+      setAttempts(attemptsData.attempts || []);
     } catch (err) {
-      console.error('Failed to fetch patients:', err);
+      console.error('Failed to fetch admin dashboard data:', err);
+      setError(err.message || 'Failed to fetch admin dashboard data.');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchPatients();
+    fetchDashboardData();
   }, []);
 
   return (
@@ -56,36 +268,157 @@ export function AdminDashboard({ onBack }) {
           <h1>MediPass Admin Dashboard</h1>
         </div>
         <div style={styles.headerActions}>
-          <button onClick={fetchPatients} disabled={loading} style={styles.refreshBtn}>
+          <button onClick={fetchDashboardData} disabled={loading} style={styles.refreshBtn}>
             <IconRefresh /> {loading ? 'Loading...' : 'Refresh'}
           </button>
         </div>
       </div>
 
-      {/* Stats */}
+      {error && <div style={styles.errorBanner}>{error}</div>}
+
       <div style={styles.statsGrid}>
-        <div style={styles.statCard}>
-          <div style={styles.statLabel}>Total Patients</div>
-          <div style={styles.statValue}>{stats.total}</div>
-        </div>
-        <div style={styles.statCard}>
-          <div style={styles.statLabel}>Registered</div>
-          <div style={styles.statValue}>{stats.registered}</div>
-          <div style={styles.statPercent}>
-            {stats.total > 0 ? Math.round((stats.registered / stats.total) * 100) : 0}%
-          </div>
-        </div>
-        <div style={styles.statCard}>
-          <div style={styles.statLabel}>Tokens Issued</div>
-          <div style={styles.statValue}>{stats.tokenIssued}</div>
-          <div style={styles.statPercent}>
-            {stats.total > 0 ? Math.round((stats.tokenIssued / stats.total) * 100) : 0}%
-          </div>
-        </div>
+        <StatCard label="Total Patients" value={metrics.totalPatients} />
+        <StatCard
+          label="Registered Patients"
+          value={metrics.registeredPatients}
+          detail={`${metrics.totalPatients ? Math.round((metrics.registeredPatients / metrics.totalPatients) * 100) : 0}% registered`}
+        />
+        <StatCard
+          label="Tokens Issued"
+          value={metrics.tokenIssued}
+          detail={`${metrics.totalPatients ? Math.round((metrics.tokenIssued / metrics.totalPatients) * 100) : 0}% issued`}
+        />
+        <StatCard label="Today's Check-ins" value={metrics.todayCheckins} />
+        <StatCard label="Check-in Success Rate" value={formatPercent(metrics.successRate)} />
+        <StatCard label="Average Successful Match" value={formatPercent(metrics.avgSuccessfulMatch)} />
+        <StatCard label="Average Failed Match" value={formatPercent(metrics.avgFailedMatch)} />
+        <StatCard label="Most Common Failure" value={metrics.mostCommonFailure ? formatReason(metrics.mostCommonFailure) : 'No data'} />
+        <StatCard label="Missing Face Registration" value={metrics.missingFacePatients.length} />
+        <StatCard label="Avg Face Samples / Registered Patient" value={formatNumber(metrics.avgFaceSamples)} />
+        <StatCard label="Avg Days Booked In Advance" value={formatNumber(metrics.avgDaysBookedAdvance)} />
       </div>
 
-      {/* Patients Table */}
-      <div style={styles.tableContainer}>
+      <div style={styles.sectionGrid}>
+        <section style={styles.panel}>
+          <h2>Failure Reasons</h2>
+          <BarList rows={metrics.failureReasons.map(row => ({ ...row, label: formatReason(row.label) }))} />
+        </section>
+
+        <section style={styles.panel}>
+          <h2>Check-ins Over Time</h2>
+          <BarList rows={metrics.checkinsOverTime} />
+        </section>
+      </div>
+
+      <section style={styles.panel}>
+        <h2>Department Breakdown</h2>
+        {metrics.departmentRows.length ? (
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th>Department</th>
+                <th>Appointments</th>
+                <th>Check-in Attempts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.departmentRows.map(row => (
+                <tr key={row.label}>
+                  <td>{row.label}</td>
+                  <td>{row.appointments}</td>
+                  <td>{row.checkins}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <EmptyState />}
+      </section>
+
+      <section style={styles.panel}>
+        <h2>Risky Matches</h2>
+        {metrics.riskyAttempts.length ? (
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Type</th>
+                <th>Confidence</th>
+                <th>Patient</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.riskyAttempts.map(attempt => (
+                <tr key={attempt.attempt_id}>
+                  <td><small>{formatDateTime(attempt.timestamp)}</small></td>
+                  <td>{attempt.success ? 'Low-confidence success' : 'High-confidence failure'}</td>
+                  <td>{formatPercent(attempt.confidence)}</td>
+                  <td><code>{attempt.patient_id || 'Unknown'}</code></td>
+                  <td>{formatReason(attempt.reason)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <EmptyState message="No risky matches found." />}
+      </section>
+
+      <section style={styles.panel}>
+        <h2>Unregistered Patients</h2>
+        {metrics.missingFacePatients.length ? (
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th>Patient ID</th>
+                <th>Name</th>
+                <th>Appointment</th>
+                <th>Doctor</th>
+                <th>Department</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.missingFacePatients.map(patient => (
+                <tr key={patient.patient_id}>
+                  <td><code>{patient.patient_id}</code></td>
+                  <td>{patient.name || 'Unknown'}</td>
+                  <td><small>{formatDateTime(patient.appointment_time)}</small></td>
+                  <td>{patient.doctor || 'Not set'}</td>
+                  <td>{patient.department || 'Not set'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <EmptyState message="All patients have at least one registered face sample." />}
+      </section>
+
+      <section style={styles.panel}>
+        <h2>Repeated Failures</h2>
+        {metrics.repeatedFailures.length ? (
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th>Patient / Group</th>
+                <th>Failures</th>
+                <th>Average Confidence</th>
+                <th>Most Common Reason</th>
+                <th>Last Attempt</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.repeatedFailures.map(row => (
+                <tr key={row.label}>
+                  <td><code>{row.label}</code></td>
+                  <td>{row.count}</td>
+                  <td>{formatPercent(row.avgConfidence)}</td>
+                  <td>{formatReason(row.topReason)}</td>
+                  <td><small>{formatDateTime(row.lastAttempt)}</small></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <EmptyState message="No repeated failures yet." />}
+      </section>
+
+      <section style={styles.panel}>
         <h2>Patients</h2>
         <table style={styles.table}>
           <thead>
@@ -95,31 +428,27 @@ export function AdminDashboard({ onBack }) {
               <th>Appointment</th>
               <th>Doctor</th>
               <th>Registered</th>
+              <th>Face Samples</th>
               <th>Token Issued</th>
               <th>Token</th>
             </tr>
           </thead>
           <tbody>
-            {patients.map((p) => (
-              <tr key={p.patient_id}>
-                <td>
-                  <code>{p.patient_id}</code>
-                </td>
-                <td>{p.name}</td>
-                <td>
-                  <small>{p.appointment_time ? new Date(p.appointment_time).toLocaleString() : 'Not set'}</small>
-                </td>
-                <td>{p.doctor || 'Not set'}</td>
-                <td>{p.registered ? '✅' : '❌'}</td>
-                <td>{p.token_issued ? '✅' : '⏳'}</td>
-                <td>
-                  <code style={styles.tokenCode}>{p.digital_token || 'Not issued'}</code>
-                </td>
+            {patients.map((patient) => (
+              <tr key={patient.patient_id}>
+                <td><code>{patient.patient_id}</code></td>
+                <td>{patient.name || 'Unknown'}</td>
+                <td><small>{formatDateTime(patient.appointment_time)}</small></td>
+                <td>{patient.doctor || 'Not set'}</td>
+                <td>{(patient.face_embedding_count || 0) > 0 ? 'Yes' : 'No'}</td>
+                <td>{patient.face_embedding_count || 0}</td>
+                <td>{patient.token_issued ? 'Yes' : 'No'}</td>
+                <td><code style={styles.tokenCode}>{patient.digital_token || 'Not issued'}</code></td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
+      </section>
     </div>
   );
 }
@@ -127,7 +456,7 @@ export function AdminDashboard({ onBack }) {
 const styles = {
   container: {
     padding: '24px',
-    maxWidth: '1200px',
+    maxWidth: '1320px',
     margin: '0 auto',
   },
   header: {
@@ -169,41 +498,60 @@ const styles = {
     fontSize: '13px',
     fontWeight: '500',
   },
+  errorBanner: {
+    background: 'rgba(239,68,68,0.12)',
+    border: '1px solid rgba(239,68,68,0.35)',
+    borderRadius: '8px',
+    color: '#fecaca',
+    padding: '12px 14px',
+    marginBottom: '16px',
+    fontSize: '13px',
+  },
   statsGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-    gap: '16px',
-    marginBottom: '32px',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
+    gap: '14px',
+    marginBottom: '24px',
   },
   statCard: {
     background: '#0f172a',
     border: '1px solid #1e293b',
-    borderRadius: '12px',
-    padding: '20px',
+    borderRadius: '8px',
+    padding: '16px',
+    minHeight: '118px',
   },
   statLabel: {
-    fontSize: '12px',
+    minHeight: '32px',
+    fontSize: '11px',
     color: '#64748b',
     textTransform: 'uppercase',
     letterSpacing: '0.05em',
     marginBottom: '8px',
   },
   statValue: {
-    fontSize: '32px',
+    fontSize: '26px',
     fontWeight: '700',
     color: '#38bdf8',
+    lineHeight: 1.15,
+    overflowWrap: 'anywhere',
   },
   statPercent: {
     fontSize: '12px',
-    color: '#475569',
+    color: '#64748b',
     marginTop: '8px',
   },
-  tableContainer: {
+  sectionGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+    gap: '16px',
+  },
+  panel: {
     background: '#0f172a',
     border: '1px solid #1e293b',
-    borderRadius: '12px',
-    padding: '20px',
+    borderRadius: '8px',
+    padding: '18px',
     overflowX: 'auto',
+    marginBottom: '16px',
   },
   table: {
     width: '100%',
@@ -217,29 +565,62 @@ const styles = {
     borderRadius: '3px',
     color: '#38bdf8',
   },
+  emptyState: {
+    color: '#64748b',
+    fontSize: '13px',
+    padding: '16px 0',
+  },
+  barList: {
+    display: 'grid',
+    gap: '12px',
+  },
+  barRow: {
+    display: 'grid',
+    gap: '6px',
+  },
+  barMeta: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: '12px',
+    color: '#cbd5e1',
+    fontSize: '13px',
+  },
+  barTrack: {
+    height: '8px',
+    background: '#1e293b',
+    borderRadius: '999px',
+    overflow: 'hidden',
+  },
+  barFill: {
+    height: '100%',
+    background: '#38bdf8',
+    borderRadius: '999px',
+  },
 };
 
 const dashboardStyles = `
   h1 { font-size: 28px; font-weight: 700; color: #f8fafc; margin: 0; }
-  h2 { font-size: 18px; font-weight: 600; color: #cbd5e1; margin-bottom: 16px; }
-  
+  h2 { font-size: 17px; font-weight: 600; color: #cbd5e1; margin: 0 0 16px; }
+
   table { width: 100%; }
   th {
     text-align: left;
-    padding: 12px 16px;
-    font-size: 12px;
+    padding: 12px 14px;
+    font-size: 11px;
     font-weight: 600;
     color: #64748b;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     border-bottom: 1px solid #1e293b;
     background: rgba(15,23,42,0.5);
+    white-space: nowrap;
   }
   td {
-    padding: 12px 16px;
+    padding: 12px 14px;
     border-bottom: 1px solid #1e293b;
     font-size: 13px;
     color: #cbd5e1;
+    vertical-align: top;
   }
   tr:hover { background: rgba(56,189,248,0.05); }
   code {
@@ -251,4 +632,8 @@ const dashboardStyles = `
     border-radius: 3px;
   }
   small { color: #64748b; font-size: 11px; }
+
+  @media (max-width: 720px) {
+    h1 { font-size: 22px; }
+  }
 `;

@@ -1,8 +1,22 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import BookingFlow from "./BookingFlow";
 import { AdminDashboard } from "./AdminDashboard";
 
-const API = "http://localhost:5050";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5050";
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const formatDateTime = (value) => {
+  if (!value) return "Not set";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : DATE_TIME_FORMATTER.format(date);
+};
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 const Icon = ({ d, size = 20 }) => (
@@ -11,12 +25,8 @@ const Icon = ({ d, size = 20 }) => (
     <path d={d} />
   </svg>
 );
-const IconCalendar = () => <Icon d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zM16 3v4M8 3v4M3 10h18" />;
 const IconCamera = () => <Icon d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 0 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z M12 13m-4 0a4 4 0 1 0 8 0a4 4 0 1 0-8 0" />;
-const IconCheck = () => <Icon d="M20 6L9 17l-5-5" />;
-const IconX = () => <Icon d="M18 6L6 18M6 6l12 12" />;
 const IconToken = () => <Icon d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />;
-const IconUser = () => <Icon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" />;
 const IconUpload = () => <Icon d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />;
 
 export default function App() {
@@ -92,14 +102,14 @@ function MainMenu({ onSelectMode }) {
               <li>✅ No paper tokens</li>
               <li>✅ Instant face recognition</li>
               <li>✅ Secure on-premise storage</li>
-              <li>✅ One scan = instant token</li>
+              <li>✅ Three-angle registration</li>
             </ul>
           </div>
         </div>
       </main>
 
       <footer className="menu-footer">
-        Your data stays on premise • HIPAA compliant
+        Your data stays on premise
       </footer>
     </div>
   );
@@ -160,7 +170,7 @@ function CheckInFlow({ onBack }) {
       {phase === "success" && result ? (
         <TokenCard result={result} onReset={reset} onBack={() => setPhase("intro")} />
       ) : (
-        <CameraCheckIn onCapture={handleCapture} loading={loading} error={error} phase={phase} onReset={reset} onBack={() => setPhase("intro")} />
+        <CameraCheckIn onCapture={handleCapture} loading={loading} error={error} onReset={reset} onBack={() => setPhase("intro")} />
       )}
     </>
   );
@@ -191,7 +201,7 @@ function CheckInStart({ onBack, onStart }) {
 }
 
 // ── Camera Component ───────────────────────────────────────────────────────
-function CameraCheckIn({ onCapture, loading, error, phase, onReset, onBack }) {
+function CameraCheckIn({ onCapture, loading, error, onReset, onBack }) {
   const [streaming, setStreaming] = useState(false);
   const [camErr, setCamErr] = useState(null);
   const [countdown, setCountdown] = useState(null);
@@ -392,7 +402,7 @@ function TokenCard({ result, onReset, onBack }) {
               <h3>Appointment</h3>
               <div className="info-item">
                 <span className="label">Time:</span>
-                <span className="value">{result.patient.appointment_time}</span>
+                <span className="value">{formatDateTime(result.patient.appointment_time)}</span>
               </div>
               <div className="info-item">
                 <span className="label">Doctor:</span>

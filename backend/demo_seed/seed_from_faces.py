@@ -25,7 +25,7 @@ import re
 import shutil
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,7 @@ DEFAULT_PATIENTS_DB = BACKEND_DIR / "db" / "patients.json"
 DEFAULT_ATTEMPTS_DB = BACKEND_DIR / "db" / "checkin_attempts.json"
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 SELECTED_REGISTRATION_STEMS = ("forward", "left", "right")
+REQUIRED_FACE_SAMPLE_COUNT = 3
 DEPARTMENTS = [
     "Cardiology",
     "Dermatology",
@@ -68,8 +69,18 @@ def iso(value: datetime) -> str:
     return value.replace(microsecond=0).isoformat()
 
 
-def utc_now() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+def local_now() -> datetime:
+    return datetime.now().astimezone().replace(microsecond=0)
+
+
+def today_attempt_time(now: datetime, index: int) -> datetime:
+    """Keep seeded dashboard daily metrics populated without dating attempts in the future."""
+    today_start = now.replace(hour=0, minute=5, second=0, microsecond=0)
+    elapsed_minutes = max(0, int((now - today_start).total_seconds() // 60))
+    if elapsed_minutes == 0:
+        return now
+    minutes_back = min(index * 6, elapsed_minutes)
+    return now - timedelta(minutes=minutes_back)
 
 
 def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -98,7 +109,7 @@ def backup(path: Path) -> Path | None:
     if not path.exists():
         return None
 
-    stamp = utc_now().strftime("%Y%m%d-%H%M%S")
+    stamp = local_now().strftime("%d%m%Y-%H%M%S")
     backup_path = path.with_suffix(path.suffix + f".bak-{stamp}")
     shutil.copy2(path, backup_path)
     return backup_path
@@ -151,7 +162,8 @@ def discover_subjects(faces_dir: Path) -> list[Subject]:
 
     for folder in sorted(path for path in faces_dir.iterdir() if path.is_dir()) if faces_dir.exists() else []:
         images = selected_registration_images(folder)
-        if not images:
+        if len(images) != REQUIRED_FACE_SAMPLE_COUNT:
+            print(f"Skipping {folder.name}: expected exactly 3 selected registration images.")
             continue
 
         patient_id = patient_id_from_stem(folder.name, seed_index)
@@ -199,6 +211,9 @@ def extract_embedding(face_app, image_path: Path) -> list[float] | None:
 
 
 def create_patient(subject: Subject, embeddings: list[list[float]], now: datetime) -> dict[str, Any]:
+    if len(embeddings) != REQUIRED_FACE_SAMPLE_COUNT:
+        raise ValueError("Demo patients must have exactly three face embeddings.")
+
     department = DEPARTMENTS[(subject.seed_index - 1) % len(DEPARTMENTS)]
     doctor = DOCTORS[(subject.seed_index - 1) % len(DOCTORS)]
     appointment_offset_days = (subject.seed_index % 21) - 4
@@ -269,8 +284,11 @@ def create_demo_attempts(patients: list[dict[str, Any]], now: datetime) -> list[
     attempts: list[dict[str, Any]] = []
 
     for index, patient in enumerate(patients, start=1):
-        timestamp = now - timedelta(hours=(index * 3) % 72, minutes=(index * 7) % 60)
-        has_faces = bool(patient.get("face_embeddings"))
+        if index <= 18:
+            timestamp = today_attempt_time(now, index)
+        else:
+            timestamp = now - timedelta(hours=(index * 3) % 72, minutes=(index * 7) % 60)
+        has_faces = len(patient.get("face_embeddings", [])) == REQUIRED_FACE_SAMPLE_COUNT
 
         if not has_faces:
             attempts.append(create_attempt(
@@ -331,7 +349,7 @@ def create_demo_attempts(patients: list[dict[str, Any]], now: datetime) -> list[
     for offset, reason in enumerate(["no_face", "invalid_image", "missing_image"], start=1):
         attempts.append(create_attempt(
             patient=None,
-            timestamp=now - timedelta(hours=offset),
+            timestamp=today_attempt_time(now, offset + 18),
             success=False,
             reason=reason,
             confidence=None,
@@ -355,6 +373,13 @@ def build_demo_patients(subjects: list[Subject], now: datetime) -> list[dict[str
             embedding = extract_embedding(face_app, image_path)
             if embedding is not None:
                 embeddings.append(embedding)
+
+        if len(embeddings) != REQUIRED_FACE_SAMPLE_COUNT:
+            print(
+                f"Skipping {subject.patient_id}: {subject.name} "
+                f"({len(embeddings)}/{REQUIRED_FACE_SAMPLE_COUNT} usable face samples)"
+            )
+            continue
 
         patients.append(create_patient(subject, embeddings, now))
         print(
@@ -452,7 +477,7 @@ def seed(args: argparse.Namespace) -> int:
         return 0
 
     random.seed(args.seed)
-    now = utc_now()
+    now = local_now()
     patients_db, attempts_db = load_and_backup_databases(args)
 
     if args.reset_all:
@@ -471,7 +496,11 @@ def seed(args: argparse.Namespace) -> int:
 
     write_databases(args, patients_db, attempts_db)
 
-    registered = sum(1 for patient in demo_patients if patient.get("face_embeddings"))
+    registered = sum(
+        1
+        for patient in demo_patients
+        if len(patient.get("face_embeddings", [])) == REQUIRED_FACE_SAMPLE_COUNT
+    )
     print("Seed complete.")
     print(f"Demo patients written: {len(demo_patients)}")
     print(f"Registered demo patients: {registered}")
@@ -485,7 +514,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patients-db", type=Path, default=DEFAULT_PATIENTS_DB)
     parser.add_argument("--attempts-db", type=Path, default=DEFAULT_ATTEMPTS_DB)
     parser.add_argument("--skip-attempts", action="store_true", help="Only seed patients; do not seed check-in attempts.")
-    parser.add_argument("--reset-all", action="store_true", help="Replace all patient and attempt data with demo data.")
+    parser.add_argument(
+        "--reset-all",
+        "--clear-all",
+        dest="reset_all",
+        action="store_true",
+        help="Clear all patient and attempt data, then seed demo data.",
+    )
     parser.add_argument("--clear-all-only", action="store_true", help="Clear all patients and attempts, then exit without seeding.")
     parser.add_argument("--clear-seeded-only", action="store_true", help="Clear only previous demo_seed records, then exit without seeding.")
     parser.add_argument("--dry-run", action="store_true", help="Show detected subjects without writing JSON files.")

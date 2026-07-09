@@ -18,7 +18,7 @@ services:
       - ./backend/uploads:/app/uploads
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5050/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5050/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -28,11 +28,11 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:5050
     container_name: medipass-frontend
     ports:
       - "5173:5173"
-    environment:
-      - VITE_API_URL=http://localhost:5050
     depends_on:
       - backend
     restart: unless-stopped
@@ -42,7 +42,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-
-volumes:
-  db:
-  uploads:

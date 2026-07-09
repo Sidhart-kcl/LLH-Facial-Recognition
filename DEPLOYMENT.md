@@ -27,7 +27,7 @@ This guide covers deploying MediPass to production environments with security, m
 
 ```bash
 # 1. Clone repo
-git clone <repo> && cd face-token-system
+git clone <repo> && cd <repo-directory>
 
 # 2. Build and run
 docker-compose up -d
@@ -47,6 +47,7 @@ FLASK_ENV=production
 FLASK_DEBUG=False
 SIMILARITY_THRESHOLD=0.47
 CORS_ORIGINS=https://medipass.example.com
+VITE_API_URL=https://medipass.example.com
 LOG_LEVEL=WARNING
 ```
 
@@ -58,6 +59,7 @@ services:
     environment:
       - FLASK_ENV=production
       - SIMILARITY_THRESHOLD=0.47
+      - CORS_ORIGINS=https://medipass.example.com
     expose:  # Don't expose directly; use reverse proxy
       - 5050
     restart: always
@@ -65,6 +67,9 @@ services:
       start_period: 60s  # Allow model download time
 
   frontend:
+    build:
+      args:
+        VITE_API_URL: https://medipass.example.com/api
     expose:
       - 5173
     restart: always
@@ -139,7 +144,7 @@ sudo journalctl -u medipass-backend -f
 ```bash
 # 1. Build React app
 cd /opt/medipass/frontend
-npm install --production
+npm ci
 npm run build
 
 # 2. Configure Nginx (see next section)
@@ -174,14 +179,14 @@ def verify_face():
     # ... existing code
 ```
 
-Frontend usage:
+Frontend usage with Vite:
 
 ```javascript
 const res = await fetch(`${API}/verify`, {
   method: "POST",
   headers: {
     "Content-Type": "application/json",
-    "X-API-Key": process.env.VITE_API_KEY
+    "X-API-Key": import.meta.env.VITE_API_KEY
   },
   body: JSON.stringify({ image: b64 })
 });
@@ -230,7 +235,7 @@ def log_request():
 ```bash
 # Daily backup script (cron)
 #!/bin/bash
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+TIMESTAMP=$(date +%d%m%Y_%H%M%S)
 cp /opt/medipass/backend/db/patients.json \
    /backup/medipass/patients_${TIMESTAMP}.json
 cp /opt/medipass/backend/db/checkin_attempts.json \
@@ -458,19 +463,18 @@ services:
 
 ### Database Optimization
 
-For 5000+ patients, use indexed search:
+For 5000+ patients, use indexed search over the same seven comparison vectors used by `/verify`:
 
 ```python
 from sklearn.neighbors import NearestNeighbors
 import pickle
 
-# Pre-compute index over every registered face sample.
 records = []
 for patient in patients:
-    for embedding in patient.get("face_embeddings", []):
-        records.append((patient, embedding))
+    for match_label, vector in patient_match_vectors(patient):
+        records.append((patient, match_label, vector))
 
-embeddings = np.array([embedding for _, embedding in records])
+embeddings = np.array([vector for _, _, vector in records])
 index = NearestNeighbors(n_neighbors=5, algorithm='kd_tree')
 index.fit(embeddings)
 
@@ -481,7 +485,7 @@ with open("embeddings_index.pkl", "wb") as f:
 # At verification time
 index = pickle.load(open("embeddings_index.pkl", "rb"))
 distances, indices = index.kneighbors([face_embedding])
-best_match = records[indices[0][0]][0]
+best_patient, best_label, best_vector = records[indices[0][0]]
 ```
 
 ---
@@ -504,10 +508,10 @@ best_match = records[indices[0][0]][0]
 ### Health Checks
 
 ```bash
-# Basic check
-curl -H "X-API-Key: $API_KEY" http://localhost:5050/health
+# Basic local check
+curl http://localhost:5050/health
 
-# Full system check
+# Full system check through reverse proxy
 curl https://medipass.example.com/api/health
 ```
 
@@ -520,11 +524,11 @@ curl https://medipass.example.com/api/health
 docker image prune -a --filter "until=72h"
 
 # Tag current as stable
-docker tag medipass:latest medipass:stable-2026-06-12
+docker tag medipass:latest medipass:stable-12-06-2026
 
 # Rollback
 docker-compose down
-docker pull medipass:stable-2026-06-12
+docker pull medipass:stable-12-06-2026
 docker-compose up -d
 ```
 

@@ -26,6 +26,7 @@ import numpy as np
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
+PROJECT_DIR = BACKEND_DIR.parent
 DEFAULT_FACES_DIR = BACKEND_DIR / "demo_seed" / "faces"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 SELECTED_STEMS = ("forward", "left", "right")
@@ -61,6 +62,18 @@ def image_files_in(folder: Path) -> list[Path]:
         for path in folder.iterdir()
         if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
     )
+
+
+def display_path(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(PROJECT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def cache_key_for(image_path: Path) -> str:
+    return display_path(image_path)
 
 
 def discover_identities(
@@ -194,7 +207,7 @@ def cached_embedding(
     cache: dict[str, dict[str, Any]],
 ) -> np.ndarray | None:
     stat = image_path.stat()
-    key = str(image_path.resolve())
+    key = cache_key_for(image_path)
     cached = cache.get(key)
 
     if (
@@ -448,7 +461,7 @@ def run(args: argparse.Namespace) -> None:
     top_wrong = [score for score in scores if not score.top_match_correct]
 
     report = {
-        "faces_dir": str(faces_dir),
+        "faces_dir": display_path(faces_dir),
         "identity_count": len(usable_identities),
         "probe_count": len(scores),
         "skipped_probe_count": skipped_probes,

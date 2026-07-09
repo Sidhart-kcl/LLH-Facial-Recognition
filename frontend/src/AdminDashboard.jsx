@@ -1,9 +1,26 @@
 import { useEffect, useMemo, useState } from 'react';
 
-const API = 'http://localhost:5050';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:5050';
 const MATCH_FAILURE_REASONS = new Set(['below_threshold', 'no_registered_embeddings']);
-const LOW_SUCCESS_CONFIDENCE = 55;
-const HIGH_FAILURE_CONFIDENCE = 40;
+const DEFAULT_MATCH_THRESHOLD_PERCENT = 45;
+const MATCH_THRESHOLD_MARGIN_PERCENT = 5;
+const REQUIRED_FACE_SAMPLE_COUNT = 3;
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+const SHORT_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
 
 const IconRefresh = () => (
   <svg width={16} height={16} viewBox="0 0 24 24" fill="none"
@@ -34,12 +51,63 @@ const average = (values) => {
   return clean.reduce((sum, value) => sum + value, 0) / clean.length;
 };
 
-const formatPercent = (value) => (value === null ? 'No data' : `${value.toFixed(1)}%`);
+const formatPercent = (value) =>
+  (typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)}%` : 'No data');
 const formatNumber = (value) => (value === null ? 'No data' : value.toFixed(1));
 const formatReason = (reason) => reason ? reason.replaceAll('_', ' ') : 'unknown';
 const formatDateTime = (value) => {
   const date = parseDate(value);
-  return date ? date.toLocaleString() : 'Not set';
+  return date ? DATE_TIME_FORMATTER.format(date) : 'Not set';
+};
+const patientIsRegistered = patient =>
+  (patient.face_embedding_count || 0) === REQUIRED_FACE_SAMPLE_COUNT;
+
+const isUpcomingAppointment = (patient) => {
+  const appointment = parseDate(patient.appointment_time);
+  return appointment ? appointment.getTime() >= Date.now() : false;
+};
+
+const patientLeadDays = (patient) => {
+  const created = parseDate(patient.created_at);
+  const appointment = parseDate(patient.appointment_time);
+  if (!created || !appointment) return null;
+  return (appointment.getTime() - created.getTime()) / 86400000;
+};
+
+const sortPatientsByAppointment = patients =>
+  [...patients].sort((a, b) =>
+    (parseDate(a.appointment_time)?.getTime() || 0) - (parseDate(b.appointment_time)?.getTime() || 0)
+  );
+
+const sortAttemptsNewestFirst = attempts =>
+  [...attempts].sort((a, b) =>
+    (parseDate(b.timestamp)?.getTime() || 0) - (parseDate(a.timestamp)?.getTime() || 0)
+  );
+
+const thresholdPercent = (attempt) => {
+  if (typeof attempt.threshold !== 'number' || !Number.isFinite(attempt.threshold)) {
+    return DEFAULT_MATCH_THRESHOLD_PERCENT;
+  }
+  return attempt.threshold <= 1 ? attempt.threshold * 100 : attempt.threshold;
+};
+
+const hasNumericConfidence = attempt =>
+  typeof attempt.confidence === 'number' && Number.isFinite(attempt.confidence);
+
+const isLowConfidenceSuccess = (attempt) => {
+  if (!attempt.success || !hasNumericConfidence(attempt)) return false;
+  const threshold = thresholdPercent(attempt);
+  return attempt.confidence >= threshold
+    && attempt.confidence <= threshold + MATCH_THRESHOLD_MARGIN_PERCENT;
+};
+
+const isNearMissFailure = (attempt) => {
+  if (attempt.success || !hasNumericConfidence(attempt) || !MATCH_FAILURE_REASONS.has(attempt.reason)) {
+    return false;
+  }
+  const threshold = thresholdPercent(attempt);
+  return attempt.confidence >= threshold - MATCH_THRESHOLD_MARGIN_PERCENT
+    && attempt.confidence < threshold;
 };
 
 const countBy = (items, keyFn) => {
@@ -67,11 +135,7 @@ const checkinsByHour = (attempts) => {
     .sort(([a], [b]) => a.localeCompare(b))
     .slice(-12)
     .map(([key, value]) => ({
-      label: new Date(key).toLocaleString([], {
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-      }),
+      label: SHORT_DATE_TIME_FORMATTER.format(new Date(key)),
       value,
     }));
 };
@@ -136,10 +200,10 @@ const repeatedFailures = (attempts) => {
 };
 
 const buildMetrics = (patients, attempts) => {
-  const registeredPatients = patients.filter(patient => (patient.face_embedding_count || 0) > 0);
-  const missingFacePatients = patients.filter(patient => (patient.face_embedding_count || 0) === 0);
+  const upcomingAppointments = patients.filter(isUpcomingAppointment);
   const tokenIssued = patients.filter(patient => patient.token_issued).length;
   const todayAttempts = attempts.filter(attempt => isToday(attempt.timestamp));
+  const todaySuccessfulAttempts = todayAttempts.filter(attempt => attempt.success);
   const successfulAttempts = attempts.filter(attempt => attempt.success);
   const failedMatchAttempts = attempts.filter(attempt =>
     !attempt.success
@@ -150,34 +214,26 @@ const buildMetrics = (patients, attempts) => {
   const mostCommonFailure = failureReasons[0]?.label || null;
 
   const bookedLeadDays = patients
-    .map((patient) => {
-      const created = parseDate(patient.created_at);
-      const appointment = parseDate(patient.appointment_time);
-      if (!created || !appointment) return null;
-      return (appointment.getTime() - created.getTime()) / 86400000;
-    })
+    .map(patientLeadDays)
     .filter(value => typeof value === 'number' && Number.isFinite(value));
 
   const riskyAttempts = attempts
-    .filter(attempt => typeof attempt.confidence === 'number')
-    .filter(attempt =>
-      (attempt.success && attempt.confidence < LOW_SUCCESS_CONFIDENCE)
-      || (!attempt.success && MATCH_FAILURE_REASONS.has(attempt.reason) && attempt.confidence >= HIGH_FAILURE_CONFIDENCE)
-    )
+    .filter(attempt => isLowConfidenceSuccess(attempt) || isNearMissFailure(attempt))
     .sort((a, b) => (parseDate(b.timestamp)?.getTime() || 0) - (parseDate(a.timestamp)?.getTime() || 0))
     .slice(0, 12);
 
   return {
     totalPatients: patients.length,
-    registeredPatients: registeredPatients.length,
+    upcomingAppointments: upcomingAppointments.length,
     tokenIssued,
-    todayCheckins: todayAttempts.length,
+    todayCheckinAttempts: todayAttempts.length,
+    todaySuccessfulCheckins: todaySuccessfulAttempts.length,
     successRate: attempts.length ? (successfulAttempts.length / attempts.length) * 100 : null,
     avgSuccessfulMatch: average(successfulAttempts.map(attempt => attempt.confidence)),
     avgFailedMatch: average(failedMatchAttempts.map(attempt => attempt.confidence)),
+    lowConfidenceSuccesses: attempts.filter(isLowConfidenceSuccess).length,
+    nearMissFailures: attempts.filter(isNearMissFailure).length,
     mostCommonFailure,
-    missingFacePatients,
-    avgFaceSamples: average(registeredPatients.map(patient => patient.face_embedding_count || 0)),
     avgDaysBookedAdvance: average(bookedLeadDays),
     failureReasons,
     checkinsOverTime: checkinsByHour(attempts),
@@ -187,9 +243,25 @@ const buildMetrics = (patients, attempts) => {
   };
 };
 
-function StatCard({ label, value, detail }) {
+function DrilldownStatCard({ label, value, detail, onClick, active }) {
   return (
-    <div style={styles.statCard}>
+    <div
+      className={`admin-stat-card${active ? ' is-active' : ''}`}
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onClick();
+        }
+      }}
+      style={{
+        ...styles.statCard,
+        ...styles.statAction,
+        ...(active ? styles.statCardActive : {}),
+      }}
+    >
       <div style={styles.statLabel}>{label}</div>
       <div style={styles.statValue}>{value}</div>
       {detail && <div style={styles.statPercent}>{detail}</div>}
@@ -222,13 +294,178 @@ function BarList({ rows, valueLabel = value => value }) {
   );
 }
 
+function PatientTable({ patients, showLeadDays = false }) {
+  if (!patients.length) return <EmptyState />;
+
+  return (
+    <table style={styles.table}>
+      <thead>
+        <tr>
+          <th>Patient ID</th>
+          <th>Name</th>
+          <th>Appointment</th>
+          <th>Doctor</th>
+          <th>Department</th>
+          <th>Registered</th>
+          <th>Token Issued</th>
+          {showLeadDays && <th>Days Booked Ahead</th>}
+          <th>Token</th>
+        </tr>
+      </thead>
+      <tbody>
+        {patients.map((patient) => {
+          const leadDays = patientLeadDays(patient);
+          return (
+            <tr key={patient.patient_id}>
+              <td><code>{patient.patient_id}</code></td>
+              <td>{patient.name || 'Unknown'}</td>
+              <td><small>{formatDateTime(patient.appointment_time)}</small></td>
+              <td>{patient.doctor || 'Not set'}</td>
+              <td>{patient.department || 'Not set'}</td>
+              <td>{patientIsRegistered(patient) ? 'Yes' : 'No'}</td>
+              <td>{patient.token_issued ? 'Yes' : 'No'}</td>
+              {showLeadDays && <td>{formatNumber(leadDays)}</td>}
+              <td><code style={styles.tokenCode}>{patient.digital_token || 'Not issued'}</code></td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function AttemptTable({ attempts }) {
+  if (!attempts.length) return <EmptyState />;
+
+  return (
+    <table style={styles.table}>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Result</th>
+          <th>Confidence</th>
+          <th>Threshold</th>
+          <th>Patient</th>
+          <th>Department</th>
+          <th>Reason</th>
+          <th>Error</th>
+        </tr>
+      </thead>
+      <tbody>
+        {attempts.map((attempt) => (
+          <tr key={attempt.attempt_id}>
+            <td><small>{formatDateTime(attempt.timestamp)}</small></td>
+            <td>{attempt.success ? 'Success' : 'Failed'}</td>
+            <td>{formatPercent(attempt.confidence)}</td>
+            <td>{formatPercent(thresholdPercent(attempt))}</td>
+            <td><code>{attempt.patient_id || 'Unknown'}</code></td>
+            <td>{attempt.department || 'Not set'}</td>
+            <td>{formatReason(attempt.reason)}</td>
+            <td>{attempt.error || 'None'}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 export function AdminDashboard({ onBack }) {
   const [patients, setPatients] = useState([]);
   const [attempts, setAttempts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [activeDrilldown, setActiveDrilldown] = useState(null);
 
   const metrics = useMemo(() => buildMetrics(patients, attempts), [patients, attempts]);
+  const drilldowns = useMemo(() => {
+    const sortedPatients = sortPatientsByAppointment(patients);
+    const sortedAttempts = sortAttemptsNewestFirst(attempts);
+    const todayAttempts = sortedAttempts.filter(attempt => isToday(attempt.timestamp));
+    const successfulAttempts = sortedAttempts.filter(attempt => attempt.success);
+    const failedMatchAttempts = sortedAttempts.filter(attempt =>
+      !attempt.success
+      && hasNumericConfidence(attempt)
+      && MATCH_FAILURE_REASONS.has(attempt.reason)
+    );
+
+    return {
+      totalPatients: {
+        title: 'Total Patients',
+        type: 'patients',
+        rows: sortedPatients,
+      },
+      upcomingAppointments: {
+        title: 'Upcoming Appointments',
+        type: 'patients',
+        rows: sortedPatients.filter(isUpcomingAppointment),
+      },
+      tokensIssued: {
+        title: 'Tokens Issued',
+        type: 'patients',
+        rows: sortedPatients.filter(patient => patient.token_issued),
+      },
+      avgDaysBookedAdvance: {
+        title: 'Average Days Booked In Advance',
+        type: 'patients',
+        rows: sortedPatients.filter(patient => patientLeadDays(patient) !== null),
+        showLeadDays: true,
+      },
+      todayCheckinAttempts: {
+        title: "Today's Check-in Attempts",
+        type: 'attempts',
+        rows: todayAttempts,
+      },
+      todaySuccessfulCheckins: {
+        title: "Today's Successful Check-ins",
+        type: 'attempts',
+        rows: todayAttempts.filter(attempt => attempt.success),
+      },
+      successRate: {
+        title: 'Check-in Success Rate',
+        type: 'attempts',
+        rows: sortedAttempts,
+      },
+      mostCommonFailure: {
+        title: metrics.mostCommonFailure
+          ? `Most Common Failure: ${formatReason(metrics.mostCommonFailure)}`
+          : 'Most Common Failure',
+        type: 'attempts',
+        rows: metrics.mostCommonFailure
+          ? sortedAttempts.filter(attempt => !attempt.success && attempt.reason === metrics.mostCommonFailure)
+          : [],
+      },
+      avgSuccessfulMatch: {
+        title: 'Average Successful Match',
+        type: 'attempts',
+        rows: successfulAttempts.filter(hasNumericConfidence),
+      },
+      avgFailedMatch: {
+        title: 'Average Failed Match',
+        type: 'attempts',
+        rows: failedMatchAttempts,
+      },
+      lowConfidenceSuccesses: {
+        title: 'Low-Confidence Successes',
+        type: 'attempts',
+        rows: sortedAttempts.filter(isLowConfidenceSuccess),
+      },
+      nearMissFailures: {
+        title: 'Near-Miss Failures',
+        type: 'attempts',
+        rows: sortedAttempts.filter(isNearMissFailure),
+      },
+    };
+  }, [patients, attempts, metrics.mostCommonFailure]);
+
+  const selectedDrilldown = activeDrilldown ? drilldowns[activeDrilldown] : null;
+
+  const drilldownCard = (key, props) => (
+    <DrilldownStatCard
+      {...props}
+      active={activeDrilldown === key}
+      onClick={() => setActiveDrilldown(current => current === key ? null : key)}
+    />
+  );
 
   const fetchDashboardData = async () => {
     setLoading(true);
@@ -264,11 +501,11 @@ export function AdminDashboard({ onBack }) {
 
       <div style={styles.header}>
         <div style={styles.headerTitle}>
-          <button onClick={onBack} style={styles.backBtn}>← Back</button>
+          <button className="admin-back-btn" onClick={onBack} style={styles.backBtn}>← Back</button>
           <h1>MediPass Admin Dashboard</h1>
         </div>
         <div style={styles.headerActions}>
-          <button onClick={fetchDashboardData} disabled={loading} style={styles.refreshBtn}>
+          <button className="admin-refresh-btn" onClick={fetchDashboardData} disabled={loading} style={styles.refreshBtn}>
             <IconRefresh /> {loading ? 'Loading...' : 'Refresh'}
           </button>
         </div>
@@ -277,26 +514,78 @@ export function AdminDashboard({ onBack }) {
       {error && <div style={styles.errorBanner}>{error}</div>}
 
       <div style={styles.statsGrid}>
-        <StatCard label="Total Patients" value={metrics.totalPatients} />
-        <StatCard
-          label="Registered Patients"
-          value={metrics.registeredPatients}
-          detail={`${metrics.totalPatients ? Math.round((metrics.registeredPatients / metrics.totalPatients) * 100) : 0}% registered`}
-        />
-        <StatCard
-          label="Tokens Issued"
-          value={metrics.tokenIssued}
-          detail={`${metrics.totalPatients ? Math.round((metrics.tokenIssued / metrics.totalPatients) * 100) : 0}% issued`}
-        />
-        <StatCard label="Today's Check-ins" value={metrics.todayCheckins} />
-        <StatCard label="Check-in Success Rate" value={formatPercent(metrics.successRate)} />
-        <StatCard label="Average Successful Match" value={formatPercent(metrics.avgSuccessfulMatch)} />
-        <StatCard label="Average Failed Match" value={formatPercent(metrics.avgFailedMatch)} />
-        <StatCard label="Most Common Failure" value={metrics.mostCommonFailure ? formatReason(metrics.mostCommonFailure) : 'No data'} />
-        <StatCard label="Missing Face Registration" value={metrics.missingFacePatients.length} />
-        <StatCard label="Avg Face Samples / Registered Patient" value={formatNumber(metrics.avgFaceSamples)} />
-        <StatCard label="Avg Days Booked In Advance" value={formatNumber(metrics.avgDaysBookedAdvance)} />
+        {drilldownCard('totalPatients', { label: 'Total Patients', value: metrics.totalPatients })}
+        {drilldownCard('upcomingAppointments', {
+          label: 'Upcoming Appointments',
+          value: metrics.upcomingAppointments,
+          detail: `${metrics.totalPatients ? Math.round((metrics.upcomingAppointments / metrics.totalPatients) * 100) : 0}% upcoming`,
+        })}
+        {drilldownCard('todayCheckinAttempts', {
+          label: "Today's Check-in Attempts",
+          value: metrics.todayCheckinAttempts,
+        })}
+        {drilldownCard('todaySuccessfulCheckins', {
+          label: "Today's Successful Check-ins",
+          value: metrics.todaySuccessfulCheckins,
+        })}
+        {drilldownCard('avgSuccessfulMatch', {
+          label: 'Average Successful Match',
+          value: formatPercent(metrics.avgSuccessfulMatch),
+        })}
+        {drilldownCard('avgFailedMatch', {
+          label: 'Average Failed Match',
+          value: formatPercent(metrics.avgFailedMatch),
+        })}
+        {drilldownCard('tokensIssued', {
+          label: 'Tokens Issued',
+          value: metrics.tokenIssued,
+          detail: `${metrics.totalPatients ? Math.round((metrics.tokenIssued / metrics.totalPatients) * 100) : 0}% issued`,
+        })}
+        {drilldownCard('avgDaysBookedAdvance', {
+          label: 'Avg Days Booked In Advance',
+          value: formatNumber(metrics.avgDaysBookedAdvance),
+        })}
+        {drilldownCard('successRate', {
+          label: 'Check-in Success Rate',
+          value: formatPercent(metrics.successRate),
+        })}
+        {drilldownCard('mostCommonFailure', {
+          label: 'Most Common Failure',
+          value: metrics.mostCommonFailure ? formatReason(metrics.mostCommonFailure) : 'No data',
+        })}
+        {drilldownCard('lowConfidenceSuccesses', {
+          label: 'Low-Confidence Successes',
+          value: metrics.lowConfidenceSuccesses,
+          detail: `within ${MATCH_THRESHOLD_MARGIN_PERCENT}% above threshold`,
+        })}
+        {drilldownCard('nearMissFailures', {
+          label: 'Near-Miss Failures',
+          value: metrics.nearMissFailures,
+          detail: `within ${MATCH_THRESHOLD_MARGIN_PERCENT}% below threshold`,
+        })}
       </div>
+
+      {selectedDrilldown && (
+        <section style={styles.panel}>
+          <div style={styles.drilldownHeader}>
+            <div>
+              <h2>{selectedDrilldown.title}</h2>
+              <div style={styles.drilldownMeta}>{selectedDrilldown.rows.length} records</div>
+            </div>
+            <button className="admin-clear-btn" type="button" onClick={() => setActiveDrilldown(null)} style={styles.closeBtn}>
+              Clear
+            </button>
+          </div>
+          {selectedDrilldown.type === 'patients' ? (
+            <PatientTable
+              patients={selectedDrilldown.rows}
+              showLeadDays={selectedDrilldown.showLeadDays}
+            />
+          ) : (
+            <AttemptTable attempts={selectedDrilldown.rows} />
+          )}
+        </section>
+      )}
 
       <div style={styles.sectionGrid}>
         <section style={styles.panel}>
@@ -363,34 +652,6 @@ export function AdminDashboard({ onBack }) {
       </section>
 
       <section style={styles.panel}>
-        <h2>Unregistered Patients</h2>
-        {metrics.missingFacePatients.length ? (
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th>Patient ID</th>
-                <th>Name</th>
-                <th>Appointment</th>
-                <th>Doctor</th>
-                <th>Department</th>
-              </tr>
-            </thead>
-            <tbody>
-              {metrics.missingFacePatients.map(patient => (
-                <tr key={patient.patient_id}>
-                  <td><code>{patient.patient_id}</code></td>
-                  <td>{patient.name || 'Unknown'}</td>
-                  <td><small>{formatDateTime(patient.appointment_time)}</small></td>
-                  <td>{patient.doctor || 'Not set'}</td>
-                  <td>{patient.department || 'Not set'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : <EmptyState message="All patients have at least one registered face sample." />}
-      </section>
-
-      <section style={styles.panel}>
         <h2>Repeated Failures</h2>
         {metrics.repeatedFailures.length ? (
           <table style={styles.table}>
@@ -420,34 +681,7 @@ export function AdminDashboard({ onBack }) {
 
       <section style={styles.panel}>
         <h2>Patients</h2>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th>Patient ID</th>
-              <th>Name</th>
-              <th>Appointment</th>
-              <th>Doctor</th>
-              <th>Registered</th>
-              <th>Face Samples</th>
-              <th>Token Issued</th>
-              <th>Token</th>
-            </tr>
-          </thead>
-          <tbody>
-            {patients.map((patient) => (
-              <tr key={patient.patient_id}>
-                <td><code>{patient.patient_id}</code></td>
-                <td>{patient.name || 'Unknown'}</td>
-                <td><small>{formatDateTime(patient.appointment_time)}</small></td>
-                <td>{patient.doctor || 'Not set'}</td>
-                <td>{(patient.face_embedding_count || 0) > 0 ? 'Yes' : 'No'}</td>
-                <td>{patient.face_embedding_count || 0}</td>
-                <td>{patient.token_issued ? 'Yes' : 'No'}</td>
-                <td><code style={styles.tokenCode}>{patient.digital_token || 'Not issued'}</code></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <PatientTable patients={sortPatientsByAppointment(patients)} />
       </section>
     </div>
   );
@@ -515,10 +749,18 @@ const styles = {
   },
   statCard: {
     background: '#0f172a',
-    border: '1px solid #1e293b',
+    border: '1px solid transparent',
     borderRadius: '8px',
     padding: '16px',
     minHeight: '118px',
+  },
+  statAction: {
+    cursor: 'pointer',
+    userSelect: 'none',
+  },
+  statCardActive: {
+    borderColor: '#38bdf8',
+    boxShadow: '0 0 0 1px rgba(56,189,248,0.25)',
   },
   statLabel: {
     minHeight: '32px',
@@ -552,6 +794,26 @@ const styles = {
     padding: '18px',
     overflowX: 'auto',
     marginBottom: '16px',
+  },
+  drilldownHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: '16px',
+    marginBottom: '16px',
+  },
+  drilldownMeta: {
+    color: '#64748b',
+    fontSize: '12px',
+  },
+  closeBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    color: '#cbd5e1',
+    padding: '7px 12px',
+    borderRadius: '6px',
+    cursor: 'pointer',
+    fontSize: '12px',
   },
   table: {
     width: '100%',
@@ -601,6 +863,39 @@ const styles = {
 const dashboardStyles = `
   h1 { font-size: 28px; font-weight: 700; color: #f8fafc; margin: 0; }
   h2 { font-size: 17px; font-weight: 600; color: #cbd5e1; margin: 0 0 16px; }
+  button:hover { border-color: #38bdf8; }
+  .admin-stat-card,
+  .admin-stat-card:hover,
+  .admin-stat-card:active {
+    border-color: transparent !important;
+    box-shadow: none !important;
+    outline: none !important;
+    outline-offset: 0 !important;
+  }
+  .admin-stat-card:hover:not(.is-active) {
+    background: #111c33 !important;
+  }
+  .admin-stat-card.is-active {
+    border-color: #38bdf8 !important;
+    box-shadow: 0 0 0 1px rgba(56,189,248,0.25) !important;
+  }
+  .admin-stat-card.is-active:hover {
+    background: #12213a !important;
+  }
+  .admin-back-btn:hover,
+  .admin-clear-btn:hover {
+    background: rgba(56,189,248,0.08) !important;
+    border-color: #38bdf8 !important;
+    color: #e0f2fe !important;
+  }
+  .admin-refresh-btn:hover:not(:disabled) {
+    background: #38bdf8 !important;
+    box-shadow: 0 0 0 1px rgba(56,189,248,0.3) !important;
+  }
+  .admin-refresh-btn:disabled {
+    opacity: 0.65;
+    cursor: wait !important;
+  }
 
   table { width: 100%; }
   th {

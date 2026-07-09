@@ -1,6 +1,59 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
-const API = "http://localhost:5050";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5050";
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const formatDateTime = (value) => {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Not set" : DATE_TIME_FORMATTER.format(date);
+};
+
+const FIELD_LABELS = {
+  name: "name",
+  doctor: "doctor",
+  department: "department",
+  appointment_date: "appointment date",
+  appointment_clock: "appointment time",
+};
+
+const formatAppointmentDateInput = (value) => {
+  const digits = value.replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+};
+
+const parseAppointmentDate = (value) => {
+  const match = value.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!match) return null;
+
+  const [, dayText, monthText, yearText] = match;
+  const day = Number(dayText);
+  const month = Number(monthText);
+  const year = Number(yearText);
+  const date = new Date(year, month - 1, day);
+
+  if (
+    date.getFullYear() !== year
+    || date.getMonth() !== month - 1
+    || date.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return {
+    day: String(day).padStart(2, "0"),
+    month: String(month).padStart(2, "0"),
+    year: String(year),
+  };
+};
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 const Icon = ({ d, size = 20 }) => (
@@ -10,10 +63,8 @@ const Icon = ({ d, size = 20 }) => (
   </svg>
 );
 const IconCalendar = () => <Icon d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zM16 3v4M8 3v4M3 10h18" />;
-const IconCamera = () => <Icon d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 0 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z M12 13m-4 0a4 4 0 1 0 8 0a4 4 0 1 0-8 0" />;
 const IconCheck = () => <Icon d="M20 6L9 17l-5-5" />;
 const IconX = () => <Icon d="M18 6L6 18M6 6l12 12" />;
-const IconUpload = () => <Icon d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />;
 const IconToken = () => <Icon d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />;
 const IconUser = () => <Icon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" />;
 
@@ -23,24 +74,40 @@ function StepInfo({ onNext }) {
     name: "",
     doctor: "",
     department: "",
-    appointment_time: "",
+    appointment_date: "",
+    appointment_clock: "",
   });
   const [error, setError] = useState(null);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setForm(prev => ({ ...prev, [name]: value }));
+    const nextValue = name === "appointment_date" ? formatAppointmentDateInput(value) : value;
+    setForm(prev => ({ ...prev, [name]: nextValue }));
     setError(null);
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    const missing = Object.entries(form).filter(([_, v]) => !v).map(([k]) => k);
+    const missing = Object.entries(form)
+      .filter((entry) => !entry[1])
+      .map(([key]) => FIELD_LABELS[key] || key);
     if (missing.length > 0) {
       setError(`Missing: ${missing.join(", ")}`);
       return;
     }
-    onNext(form);
+
+    const appointmentDate = parseAppointmentDate(form.appointment_date);
+    if (!appointmentDate) {
+      setError("Appointment date must be in dd/mm/yyyy format.");
+      return;
+    }
+
+    onNext({
+      name: form.name,
+      doctor: form.doctor,
+      department: form.department,
+      appointment_time: `${appointmentDate.year}-${appointmentDate.month}-${appointmentDate.day}T${form.appointment_clock}`,
+    });
   };
 
   return (
@@ -97,14 +164,26 @@ function StepInfo({ onNext }) {
         </div>
 
         <div className="form-group">
-          <label><IconCalendar /> Appointment Time</label>
-          <input
-            type="datetime-local"
-            name="appointment_time"
-            value={form.appointment_time}
-            onChange={handleChange}
-            required
-          />
+          <label><IconCalendar /> Appointment Date And Time</label>
+          <div className="date-time-row">
+            <input
+              type="text"
+              name="appointment_date"
+              placeholder="dd/mm/yyyy"
+              inputMode="numeric"
+              autoComplete="off"
+              value={form.appointment_date}
+              onChange={handleChange}
+              required
+            />
+            <input
+              type="time"
+              name="appointment_clock"
+              value={form.appointment_clock}
+              onChange={handleChange}
+              required
+            />
+          </div>
         </div>
 
         {error && <div className="error-message">{error}</div>}
@@ -117,15 +196,31 @@ function StepInfo({ onNext }) {
   );
 }
 
-// ── Step 2: Face Capture ───────────────────────────────────────────────────
-function StepFaceCapture({ form, onNext, onBack }) {
+// ── Step 2: Guided Face Capture ────────────────────────────────────────────
+const FACE_SCAN_STEPS = [
+  { id: "forward", label: "Straight", instruction: "Look straight at the camera" },
+  { id: "left", label: "Left", instruction: "Turn slightly left" },
+  { id: "right", label: "Right", instruction: "Turn slightly right" },
+];
+
+function StepFaceCapture({ onNext, onBack }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const analyzeCanvasRef = useRef(null);
+  const analyzingRef = useRef(false);
+  const stableReadyRef = useRef(0);
+  const captureLockRef = useRef(false);
   const [streaming, setStreaming] = useState(false);
   const [camErr, setCamErr] = useState(null);
-  const [captured, setCaptured] = useState(null);
-  const [countdown, setCountdown] = useState(null);
-  const [uploadMode, setUploadMode] = useState(false);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [captures, setCaptures] = useState([]);
+  const [poseStatus, setPoseStatus] = useState({
+    ready: false,
+    message: "Starting camera...",
+  });
+  const [complete, setComplete] = useState(false);
+
+  const currentStep = FACE_SCAN_STEPS[currentIndex];
 
   useEffect(() => {
     let stream;
@@ -134,51 +229,136 @@ function StepFaceCapture({ form, onNext, onBack }) {
         stream = await navigator.mediaDevices.getUserMedia({
           video: { width: 640, height: 480, facingMode: "user" },
         });
-        if (videoRef.current && !uploadMode) {
+        if (videoRef.current) {
           videoRef.current.srcObject = stream;
           setStreaming(true);
         }
       } catch (e) {
-        setCamErr("Camera access denied. You can upload a photo instead.");
+        setCamErr("Camera access denied. Please allow camera access to register your face.");
       }
     })();
     return () => stream?.getTracks().forEach(t => t.stop());
-  }, [uploadMode]);
+  }, []);
 
-  const capture = useCallback(() => {
-    if (!streaming) return;
-    let c = 3;
-    setCountdown(c);
-    const iv = setInterval(() => {
-      c -= 1;
-      if (c > 0) { setCountdown(c); return; }
-      clearInterval(iv);
-      setCountdown(null);
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext("2d").drawImage(video, 0, 0);
-      setCaptured(canvas.toDataURL("image/jpeg", 0.92));
-    }, 1000);
-  }, [streaming]);
+  useEffect(() => {
+    stableReadyRef.current = 0;
+    captureLockRef.current = false;
+    if (!complete) {
+      setPoseStatus({
+        ready: false,
+        message: currentStep?.instruction || "Registration complete",
+      });
+    }
+  }, [currentIndex, currentStep, complete]);
 
-  const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      setCaptured(event.target.result);
-    };
-    reader.readAsDataURL(file);
-  };
+  const frameToImage = useCallback((quality = 0.82, scale = 1) => {
+    const video = videoRef.current;
+    const canvas = scale === 1 ? canvasRef.current : analyzeCanvasRef.current;
+    if (!video || !canvas || !video.videoWidth || !video.videoHeight) {
+      return null;
+    }
 
-  const handleSubmit = () => {
-    if (!captured) {
-      alert("Please capture or upload a photo first");
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", quality);
+  }, []);
+
+  const captureCurrentStep = useCallback((analysis) => {
+    if (captureLockRef.current || !currentStep) return;
+
+    const image = frameToImage(0.92, 1);
+    if (!image) return;
+
+    captureLockRef.current = true;
+    stableReadyRef.current = 0;
+
+    setCaptures(prev => {
+      const next = [
+        ...prev,
+        {
+          target: currentStep.id,
+          label: currentStep.label,
+          image,
+          analysis,
+        },
+      ];
+
+      if (next.length >= FACE_SCAN_STEPS.length) {
+        setComplete(true);
+        setPoseStatus({ ready: true, message: "All face angles captured." });
+      } else {
+        setCurrentIndex(next.length);
+      }
+
+      return next;
+    });
+  }, [currentStep, frameToImage]);
+
+  const analyzeCurrentFrame = useCallback(async () => {
+    if (!streaming || complete || !currentStep || analyzingRef.current || captureLockRef.current) {
       return;
     }
-    onNext(captured);
+
+    const image = frameToImage(0.65, 0.55);
+    if (!image) return;
+
+    analyzingRef.current = true;
+    try {
+      const res = await fetch(`${API}/analyze-face-pose`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image,
+          target: currentStep.id,
+        }),
+      });
+      const data = await res.json();
+      setPoseStatus(data);
+
+      if (data.ready) {
+        stableReadyRef.current += 1;
+        if (stableReadyRef.current >= 3) {
+          captureCurrentStep(data);
+        }
+      } else {
+        stableReadyRef.current = 0;
+      }
+    } catch {
+      stableReadyRef.current = 0;
+      setPoseStatus({
+        ready: false,
+        message: "Cannot analyze face pose. Is backend running on port 5050?",
+      });
+    } finally {
+      analyzingRef.current = false;
+    }
+  }, [captureCurrentStep, complete, currentStep, frameToImage, streaming]);
+
+  useEffect(() => {
+    if (!streaming || complete) return undefined;
+
+    const interval = setInterval(analyzeCurrentFrame, 550);
+    return () => clearInterval(interval);
+  }, [analyzeCurrentFrame, complete, streaming]);
+
+  const handleSubmit = () => {
+    if (captures.length !== FACE_SCAN_STEPS.length) {
+      return;
+    }
+    onNext(captures);
+  };
+
+  const resetScans = () => {
+    stableReadyRef.current = 0;
+    captureLockRef.current = false;
+    setCaptures([]);
+    setCurrentIndex(0);
+    setComplete(false);
+    setPoseStatus({
+      ready: false,
+      message: FACE_SCAN_STEPS[0].instruction,
+    });
   };
 
   return (
@@ -187,81 +367,73 @@ function StepFaceCapture({ form, onNext, onBack }) {
         <div className="step-number">2</div>
         <div>
           <h2>Face Registration</h2>
-          <p>Capture or upload a clear photo of your face</p>
+          <p>Complete the three guided face scans</p>
         </div>
       </div>
 
-      <div className="tabs">
-        <button
-          className={`tab ${!uploadMode ? "active" : ""}`}
-          onClick={() => setUploadMode(false)}
-        >
-          <IconCamera /> Capture
-        </button>
-        <button
-          className={`tab ${uploadMode ? "active" : ""}`}
-          onClick={() => setUploadMode(true)}
-        >
-          <IconUpload /> Upload
-        </button>
+      <div className="angle-progress">
+        {FACE_SCAN_STEPS.map((step, index) => {
+          const isDone = captures.some(capture => capture.target === step.id);
+          const isActive = !isDone && index === currentIndex;
+          return (
+            <div
+              key={step.id}
+              className={`angle-step ${isDone ? "done" : ""} ${isActive ? "active" : ""}`}
+            >
+              <span>{isDone ? <IconCheck /> : index + 1}</span>
+              <strong>{step.label}</strong>
+            </div>
+          );
+        })}
       </div>
 
-      {!uploadMode ? (
-        // Camera capture mode
-        <div className="camera-section">
-          {camErr ? (
-            <div className="cam-error">
-              <IconX />
-              <p>{camErr}</p>
-            </div>
-          ) : (
-            <>
-              <div className="video-frame">
-                <video ref={videoRef} autoPlay playsInline muted className="video-el" />
-                <div className="scan-overlay">
-                  <div className="scan-corner tl" /><div className="scan-corner tr" />
-                  <div className="scan-corner bl" /><div className="scan-corner br" />
-                  {countdown && <div className="countdown">{countdown}</div>}
+      <div className="camera-section">
+        {camErr ? (
+          <div className="cam-error">
+            <IconX />
+            <p>{camErr}</p>
+          </div>
+        ) : (
+          <>
+            <div className={`video-frame ${poseStatus.ready ? "ready" : ""}`}>
+              <video ref={videoRef} autoPlay playsInline muted className="video-el" />
+              <div className="scan-overlay">
+                <div className="scan-corner tl" /><div className="scan-corner tr" />
+                <div className="scan-corner bl" /><div className="scan-corner br" />
+                <div className={`pose-status ${poseStatus.ready ? "ready" : ""}`}>
+                  <strong>{complete ? "Complete" : currentStep?.label}</strong>
+                  <span>{poseStatus.message}</span>
+                  {!complete && (
+                    <small>
+                      Stability {Math.min(stableReadyRef.current, 3)}/3
+                      {poseStatus.pose ? ` • yaw ${poseStatus.pose.yaw}` : ""}
+                    </small>
+                  )}
                 </div>
               </div>
-              <canvas ref={canvasRef} style={{ display: "none" }} />
-              <button
-                className="btn-primary"
-                onClick={capture}
-                disabled={!streaming || countdown !== null}
-              >
-                {countdown ? `Hold still… ${countdown}` : "Capture Photo"}
-              </button>
-              <p className="hint">Position your face in the center, ensure good lighting</p>
-            </>
-          )}
-        </div>
-      ) : (
-        // Upload mode
-        <div className="upload-section">
-          <label className="upload-box">
-            <IconUpload />
-            <span>Click to upload or drag and drop</span>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={handleFileUpload}
-              style={{ display: "none" }}
-            />
-          </label>
-          <p className="hint">JPG, PNG, up to 10MB</p>
-        </div>
-      )}
+            </div>
+            <canvas ref={canvasRef} style={{ display: "none" }} />
+            <canvas ref={analyzeCanvasRef} style={{ display: "none" }} />
+            <p className="hint">
+              The scan captures automatically when your face lines up and stays steady.
+            </p>
+          </>
+        )}
+      </div>
 
-      {captured && (
-        <div className="preview-section">
-          <h3>Preview</h3>
-          <img src={captured} alt="Captured face" className="preview-image" />
-          <button
-            className="btn-secondary"
-            onClick={() => setCaptured(null)}
-          >
-            Retake
+      {captures.length > 0 && (
+        <div className="capture-review">
+          <h3>Captured Angles</h3>
+          <div className="capture-grid">
+            {captures.map(capture => (
+              <div className="capture-thumb" key={capture.target}>
+                <img src={capture.image} alt={`${capture.label} face scan`} />
+                <span>{capture.label}</span>
+              </div>
+            ))}
+          </div>
+          <button className="btn-secondary" onClick={resetScans}>
+            Restart Scans
           </button>
         </div>
       )}
@@ -273,7 +445,7 @@ function StepFaceCapture({ form, onNext, onBack }) {
         <button
           className="btn-primary"
           onClick={handleSubmit}
-          disabled={!captured}
+          disabled={captures.length !== FACE_SCAN_STEPS.length}
         >
           Next: Confirm Token →
         </button>
@@ -283,7 +455,7 @@ function StepFaceCapture({ form, onNext, onBack }) {
 }
 
 // ── Step 3: Confirmation with Token ────────────────────────────────────────
-function StepConfirmation({ form, faceImage, onComplete, onRetry }) {
+function StepConfirmation({ form, faceCaptures, onComplete, onRetry }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -293,46 +465,28 @@ function StepConfirmation({ form, faceImage, onComplete, onRetry }) {
       try {
         setLoading(true);
 
-        // Step 1: Book appointment
-        console.log("📋 Booking appointment...");
-        const bookRes = await fetch(`${API}/book`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(form),
-        });
-
-        if (!bookRes.ok) {
-          throw new Error("Failed to book appointment");
-        }
-
-        const bookData = await bookRes.json();
-        const patientId = bookData.patient_id;
-
-        console.log("✅ Appointment booked:", patientId);
-
-        // Step 2: Register face
-        console.log("📸 Registering face...");
-        const registerRes = await fetch(`${API}/register`, {
+        // Create the appointment only if all three face scans register.
+        const bookRes = await fetch(`${API}/book-with-face-set`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            patient_id: patientId,
-            image: faceImage,
+            ...form,
+            images: faceCaptures.map(capture => capture.image),
           }),
         });
 
-        if (!registerRes.ok) {
-          throw new Error("Failed to register face");
+        const bookData = await bookRes.json();
+        if (!bookRes.ok) {
+          throw new Error(bookData.error || "Failed to book appointment");
         }
 
-        const registerData = await registerRes.json();
-
-        console.log("✅ Face registered");
+        const patientId = bookData.patient_id;
 
         // Success!
         setResult({
           ...bookData,
           patient_id: patientId,
+          embedding_count: bookData.embedding_count,
         });
 
         setLoading(false);
@@ -344,7 +498,7 @@ function StepConfirmation({ form, faceImage, onComplete, onRetry }) {
     };
 
     bookAndRegister();
-  }, [form, faceImage]);
+  }, [form, faceCaptures]);
 
   if (loading) {
     return (
@@ -352,7 +506,7 @@ function StepConfirmation({ form, faceImage, onComplete, onRetry }) {
         <div className="loading-state">
           <div className="spinner-large" />
           <h2>Processing Your Booking...</h2>
-          <p>Creating appointment and registering your face</p>
+          <p>Creating appointment and registering three face angles</p>
         </div>
       </div>
     );
@@ -411,6 +565,21 @@ function StepConfirmation({ form, faceImage, onComplete, onRetry }) {
             <div className="divider" />
 
             <div className="section">
+              <h3>Face Registration</h3>
+              <div className="info-row">
+                <span className="label">Face samples:</span>
+                <span className="value">{result.embedding_count || faceCaptures.length}</span>
+              </div>
+              <div className="registered-angles">
+                {faceCaptures.map(capture => (
+                  <span key={capture.target}>{capture.label}</span>
+                ))}
+              </div>
+            </div>
+
+            <div className="divider" />
+
+            <div className="section">
               <h3>Appointment Details</h3>
               <div className="info-row">
                 <span className="label">Doctor:</span>
@@ -423,16 +592,16 @@ function StepConfirmation({ form, faceImage, onComplete, onRetry }) {
               <div className="info-row">
                 <span className="label">Time:</span>
                 <span className="value">
-                  {new Date(form.appointment_time).toLocaleString()}
+                  {formatDateTime(form.appointment_time)}
                 </span>
               </div>
             </div>
           </div>
 
           <div className="instructions">
-            <h4>What's Next?</h4>
+            <h4>What&apos;s Next?</h4>
             <ol>
-              <li>Your face has been registered ✅</li>
+              <li>Your three face angles have been registered ✅</li>
               <li>At check-in, scan your face at any kiosk</li>
               <li>Your token will appear instantly</li>
               <li>Show it to the receptionist</li>
@@ -452,12 +621,12 @@ function StepConfirmation({ form, faceImage, onComplete, onRetry }) {
 export default function BookingFlow({ onComplete }) {
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState(null);
-  const [faceImage, setFaceImage] = useState(null);
+  const [faceCaptures, setFaceCaptures] = useState(null);
 
   const resetFlow = () => {
     setStep(1);
     setFormData(null);
-    setFaceImage(null);
+    setFaceCaptures(null);
   };
 
   return (
@@ -481,19 +650,18 @@ export default function BookingFlow({ onComplete }) {
 
           {step === 2 && formData && (
             <StepFaceCapture
-              form={formData}
-              onNext={(image) => {
-                setFaceImage(image);
+              onNext={(captures) => {
+                setFaceCaptures(captures);
                 setStep(3);
               }}
               onBack={() => setStep(1)}
             />
           )}
 
-          {step === 3 && formData && faceImage && (
+          {step === 3 && formData && faceCaptures && (
             <StepConfirmation
               form={formData}
-              faceImage={faceImage}
+              faceCaptures={faceCaptures}
               onComplete={() => {
                 resetFlow();
                 onComplete?.();
@@ -590,34 +758,54 @@ const styles = `
     color: #64748b;
   }
 
-  /* Tabs */
-  .tabs {
-    display: flex;
-    gap: 12px;
-    margin-bottom: 24px;
+  .angle-progress {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
   }
 
-  .tab {
-    flex: 1;
-    padding: 12px;
-    background: #1a2332;
+  .angle-step {
+    min-height: 68px;
     border: 1px solid #1e293b;
     border-radius: 10px;
+    background: #1a2332;
     color: #64748b;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .angle-step span {
+    width: 24px;
+    height: 24px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    transition: all 0.2s;
+    font-size: 12px;
+    font-weight: 700;
   }
 
-  .tab.active {
-    background: rgba(14, 165, 233, 0.15);
-    border-color: #38bdf8;
+  .angle-step svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  .angle-step.active {
     color: #38bdf8;
+    border-color: rgba(56, 189, 248, 0.65);
+    background: rgba(14, 165, 233, 0.12);
+  }
+
+  .angle-step.done {
+    color: #22c55e;
+    border-color: rgba(34, 197, 94, 0.5);
+    background: rgba(34, 197, 94, 0.1);
   }
 
   /* Form */
@@ -662,9 +850,20 @@ const styles = `
     background: #0f1a2a;
   }
 
+  .date-time-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 140px;
+    gap: 10px;
+  }
+
+  @media (max-width: 520px) {
+    .date-time-row {
+      grid-template-columns: 1fr;
+    }
+  }
+
   /* Camera */
-  .camera-section,
-  .upload-section {
+  .camera-section {
     margin-bottom: 24px;
   }
 
@@ -676,6 +875,11 @@ const styles = `
     background: #020617;
     border: 1px solid #1e293b;
     margin-bottom: 16px;
+  }
+
+  .video-frame.ready {
+    border-color: #22c55e;
+    box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.35), 0 0 28px rgba(34, 197, 94, 0.16);
   }
 
   .video-el {
@@ -707,42 +911,41 @@ const styles = `
   .scan-corner.bl { bottom: 16px; left: 16px; border-width: 0 0 2px 2px; }
   .scan-corner.br { bottom: 16px; right: 16px; border-width: 0 2px 2px 0; }
 
-  .countdown {
-    font-size: 64px;
-    font-weight: 800;
-    color: #38bdf8;
-    text-shadow: 0 0 40px #38bdf8;
-  }
-
-  .upload-box {
+  .pose-status {
+    position: absolute;
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+    background: rgba(3, 7, 18, 0.84);
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    border-radius: 10px;
+    padding: 10px 12px;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 40px;
-    border: 2px dashed #1e293b;
-    border-radius: 12px;
-    cursor: pointer;
-    transition: all 0.2s;
-    background: #1a2332;
+    gap: 3px;
+    text-align: left;
   }
 
-  .upload-box:hover {
-    border-color: #38bdf8;
-    background: #0f1a2a;
+  .pose-status strong {
+    color: #f8fafc;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 
-  .upload-box svg {
-    width: 40px;
-    height: 40px;
-    color: #38bdf8;
-    margin-bottom: 12px;
-  }
-
-  .upload-box span {
+  .pose-status span {
     color: #cbd5e1;
     font-size: 13px;
-    text-align: center;
+  }
+
+  .pose-status small {
+    color: #64748b;
+    font-size: 11px;
+  }
+
+  .pose-status.ready {
+    border-color: rgba(34, 197, 94, 0.55);
+    background: rgba(20, 83, 45, 0.72);
   }
 
   .hint {
@@ -751,28 +954,50 @@ const styles = `
     text-align: center;
   }
 
-  /* Preview */
-  .preview-section {
-    margin: 24px 0;
-    padding-top: 24px;
-    border-top: 1px solid #1e293b;
+  .capture-review {
+    margin: 20px 0 0;
+    padding: 16px;
+    background: #1a2332;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
   }
 
-  .preview-section h3 {
-    font-size: 13px;
-    font-weight: 600;
+  .capture-review h3 {
     color: #cbd5e1;
-    margin-bottom: 12px;
+    font-size: 12px;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    margin-bottom: 12px;
   }
 
-  .preview-image {
-    width: 100%;
-    border-radius: 10px;
+  .capture-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
     margin-bottom: 12px;
-    max-height: 300px;
+  }
+
+  .capture-thumb {
+    border-radius: 10px;
+    overflow: hidden;
+    background: #020617;
+    border: 1px solid #1e293b;
+  }
+
+  .capture-thumb img {
+    width: 100%;
+    aspect-ratio: 4 / 3;
     object-fit: cover;
+    display: block;
+  }
+
+  .capture-thumb span {
+    display: block;
+    padding: 7px 8px;
+    color: #cbd5e1;
+    font-size: 11px;
+    text-align: center;
   }
 
   /* Buttons */
@@ -1003,6 +1228,23 @@ const styles = `
   .token-hint {
     font-size: 11px;
     color: #64748b;
+  }
+
+  .registered-angles {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+
+  .registered-angles span {
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.28);
+    color: #86efac;
+    font-size: 11px;
+    font-weight: 700;
   }
 
   .instructions {

@@ -36,22 +36,30 @@ The app starts with navigation for:
 The booking flow:
 
 1. Collects patient name, doctor, department, and appointment time.
-2. Captures or uploads a face image.
-3. Calls `/book` to create the appointment.
-4. Calls `/register` to store the first face embedding.
+2. Runs a guided three-angle face scan.
+3. Calls `/book-with-face-set` with the appointment data and exactly three captured face images.
+4. The backend creates the patient only if all three embeddings are extracted successfully.
 5. Shows the patient ID, appointment ID, and digital token.
 
 ### 3. Face Registration
 
-`POST /register` appends a face embedding to the patient. It does not replace previous samples.
+The booking UI asks the patient to scan:
 
-That means the same patient can have multiple samples, such as:
+- Straight
+- Slightly left
+- Slightly right
+
+For each angle, the frontend sends preview frames to `/analyze-face-pose`. The backend checks face position, size, pose, detection confidence, and sharpness. When the target pose is stable, the frontend auto-captures the image.
+
+`POST /book-with-face-set` and `POST /register-face-set` require exactly three face images. A registered patient should not have 1, 2, 4, or more face samples.
+
+The required samples are:
 
 - Straight-on
 - Slightly left
 - Slightly right
 
-A patient is treated as registered when they have at least one valid embedding. In admin API responses, this is exposed as:
+A patient is treated as registered only when they have exactly three valid embeddings. In admin API responses, this is exposed as:
 
 ```json
 {
@@ -81,31 +89,55 @@ The dashboard reads:
 - `/patients`
 - `/checkin-attempts`
 
-It shows patient totals, registration coverage, token usage, check-in success rate, confidence averages, common failures, department breakdowns, risky matches, unregistered patients, and repeated failures.
+It shows patient totals, upcoming appointments, token usage, daily check-in activity, success rate, confidence averages, common failures, department breakdowns, risky matches, repeated failures, and clickable stat drill-down tables.
+
+Dates shown in the UI use `dd/mm/yyyy, HH:mm`. API payloads and local JSON storage use ISO strings because the backend parser expects machine-readable datetimes.
 
 ## API Summary
 
-### `POST /book`
+### `POST /book-with-face-set`
 
-Creates an appointment and patient record.
+Creates an appointment and patient record only after exactly three face images are valid.
+
+`appointment_time` is sent as an ISO-style API value. It is displayed to users as `dd/mm/yyyy, HH:mm`.
 
 ```json
 {
   "name": "John Doe",
   "doctor": "Dr. Smith",
   "department": "Cardiology",
-  "appointment_time": "2026-07-20T10:00:00"
+  "appointment_time": "2026-07-20T10:00:00",
+  "images": [
+    "data:image/jpeg;base64,...",
+    "data:image/jpeg;base64,...",
+    "data:image/jpeg;base64,..."
+  ]
 }
 ```
 
-### `POST /register`
+### `POST /analyze-face-pose`
 
-Appends one face sample to an existing patient.
+Checks whether a preview frame is ready to capture for `forward`, `left`, or `right`.
+
+```json
+{
+  "target": "forward",
+  "image": "data:image/jpeg;base64,..."
+}
+```
+
+### `POST /register-face-set`
+
+Replaces an existing patient's face set with exactly three face samples.
 
 ```json
 {
   "patient_id": "PAT-001",
-  "image": "data:image/jpeg;base64,..."
+  "images": [
+    "data:image/jpeg;base64,...",
+    "data:image/jpeg;base64,...",
+    "data:image/jpeg;base64,..."
+  ]
 }
 ```
 
@@ -114,7 +146,7 @@ Success includes the total number of stored samples:
 ```json
 {
   "success": true,
-  "message": "Face registered for John Doe.",
+  "message": "Three face scans registered for John Doe.",
   "embedding_count": 3
 }
 ```
@@ -140,7 +172,7 @@ Success:
     "patient_id": "PAT-001",
     "name": "John Doe",
     "appointment_id": "APT-2026-0001",
-    "appointment_time": "20 Jul 2026, 10:00 AM",
+    "appointment_time": "20/07/2026, 10:00",
     "doctor": "Dr. Smith",
     "department": "Cardiology"
   }
@@ -168,14 +200,15 @@ Patient records use JSON, not PostgreSQL:
   "doctor": "Dr. Smith",
   "department": "Cardiology",
   "digital_token": "TKN-ABC12345",
-  "created_at": "2026-07-01T08:30:00.000000",
+  "created_at": "2026-07-01T08:30:00+00:00",
   "token_issued": false,
   "face_embeddings": [
     [0.123, -0.456],
-    [0.234, -0.567]
+    [0.234, -0.567],
+    [0.345, -0.678]
   ],
   "registered": true,
-  "registered_at": "2026-07-01T08:32:00.000000"
+  "registered_at": "2026-07-01T08:32:00+00:00"
 }
 ```
 
@@ -186,12 +219,12 @@ The real embedding arrays contain 512 numbers each.
 - [ ] Backend running with `python face_service.py`
 - [ ] Frontend running with `npm run dev`
 - [ ] Book a patient through the UI
-- [ ] Register a face with camera capture
-- [ ] Register another sample using upload or the CLI
+- [ ] Complete the guided three-angle face scan
+- [ ] Re-register the same patient with exactly three replacement scans
 - [ ] Check in with camera capture
 - [ ] Check in with image upload
 - [ ] Confirm attempts appear in the admin dashboard
-- [ ] Confirm unregistered patients show in the dashboard when a patient has zero embeddings
+- [ ] Confirm patients with anything other than three embeddings show `Registered: No` in the patient table
 
 ## Troubleshooting
 
@@ -200,5 +233,5 @@ The real embedding arrays contain 512 numbers each.
 | Cannot reach server | Confirm the Flask backend is running on port `5050`. |
 | Camera denied | Allow camera access in the browser. |
 | No face detected | Use a clear image with one visible face. |
-| Face not recognised | Add more face samples or tune `SIMILARITY_THRESHOLD`. |
+| Face not recognised | Re-register the required three face samples or tune `SIMILARITY_THRESHOLD`. |
 | Dashboard is empty | Add patients through booking or run the demo seeder. |

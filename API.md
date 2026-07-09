@@ -2,7 +2,7 @@
 
 Base URL: `http://localhost:5050`
 
-All endpoints return JSON. Timestamps are ISO 8601 strings.
+All endpoints return JSON. User-facing date displays use `dd/mm/yyyy, HH:mm`. API input fields and stored JSON timestamps remain ISO 8601 strings so sorting and parsing stay reliable. The `/verify` success response formats `patient.appointment_time` for display as `dd/mm/yyyy, HH:mm`.
 
 ## `GET /health`
 
@@ -15,7 +15,7 @@ curl http://localhost:5050/health
 ```json
 {
   "status": "ok",
-  "timestamp": "2026-07-01T10:30:45.123456"
+  "timestamp": "2026-07-01T10:30:45+00:00"
 }
 ```
 
@@ -23,7 +23,7 @@ curl http://localhost:5050/health
 
 Returns patients for the admin dashboard. Raw face embeddings are excluded.
 
-`registered` is derived from `face_embedding_count > 0`.
+`registered` is derived from `face_embedding_count === 3`.
 
 ```bash
 curl http://localhost:5050/patients
@@ -40,10 +40,10 @@ curl http://localhost:5050/patients
       "doctor": "Dr. Sara Hassan",
       "department": "Cardiology",
       "digital_token": "TKN-A1B2C3D4",
-      "created_at": "2026-07-01T08:30:00.000000",
+      "created_at": "2026-07-01T08:30:00+00:00",
       "token_issued": false,
       "registered": true,
-      "registered_at": "2026-07-01T08:32:00.000000",
+      "registered_at": "2026-07-01T08:32:00+00:00",
       "face_embedding_count": 3
     }
   ]
@@ -63,7 +63,7 @@ curl http://localhost:5050/checkin-attempts
   "attempts": [
     {
       "attempt_id": "ATT-1A2B3C4D5E",
-      "timestamp": "2026-07-01T09:15:00.000000",
+      "timestamp": "2026-07-01T09:15:00+00:00",
       "success": true,
       "reason": "matched",
       "confidence": 91.4,
@@ -86,18 +86,25 @@ Common `reason` values:
 - `invalid_image`
 - `missing_image`
 
-## `POST /book`
+## `POST /book-with-face-set`
 
-Creates a patient appointment and digital token. The new patient starts unregistered with `face_embeddings: []`.
+Creates a patient appointment and digital token only after exactly three face images are validated. This prevents patient records with partial face registrations.
+
+`appointment_time` is an API input value and should be sent as an ISO-style datetime string. The frontend displays it back to users as `dd/mm/yyyy, HH:mm`.
 
 ```bash
-curl -X POST http://localhost:5050/book \
+curl -X POST http://localhost:5050/book-with-face-set \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Layla Al Mazrouei",
     "doctor": "Dr. Hana Nasser",
     "department": "Pediatrics",
-    "appointment_time": "2026-07-15T15:00:00"
+    "appointment_time": "2026-07-15T15:00:00",
+    "images": [
+      "data:image/jpeg;base64,...",
+      "data:image/jpeg;base64,...",
+      "data:image/jpeg;base64,..."
+    ]
   }'
 ```
 
@@ -107,6 +114,7 @@ Required fields:
 - `doctor`
 - `department`
 - `appointment_time`
+- `images`: exactly three base64 image strings
 
 Success:
 
@@ -116,34 +124,39 @@ Success:
   "patient_id": "PAT-004",
   "appointment_id": "APT-2026-0004",
   "digital_token": "TKN-X9Y0Z1A2",
-  "message": "Appointment booked. Please register your face to activate your digital token."
+  "embedding_count": 3,
+  "message": "Appointment booked with three registered face scans."
 }
 ```
 
-## `POST /register`
+## `POST /register-face-set`
 
-Appends one face embedding to an existing patient. Calling this endpoint multiple times for the same patient stores multiple samples for that patient.
+Replaces an existing patient's face set with exactly three validated embeddings. This endpoint is for re-registration, not appending.
 
 ```bash
-curl -X POST http://localhost:5050/register \
+curl -X POST http://localhost:5050/register-face-set \
   -H "Content-Type: application/json" \
   -d '{
     "patient_id": "PAT-001",
-    "image": "data:image/jpeg;base64,..."
+    "images": [
+      "data:image/jpeg;base64,...",
+      "data:image/jpeg;base64,...",
+      "data:image/jpeg;base64,..."
+    ]
   }'
 ```
 
 Required fields:
 
 - `patient_id`
-- `image`: base64 image string, with or without a data URI prefix
+- `images`: exactly three base64 image strings, with or without data URI prefixes
 
 Success:
 
 ```json
 {
   "success": true,
-  "message": "Face registered for Ahmed Al Mansouri.",
+  "message": "Three face scans registered for Ahmed Al Mansouri.",
   "embedding_count": 3
 }
 ```
@@ -154,6 +167,63 @@ Failures:
 {
   "success": false,
   "error": "Patient PAT-999 not found."
+}
+```
+
+## `POST /book` And `POST /register`
+
+These older single-purpose endpoints are disabled because they could create patient records with 0, 1, 2, or more than 3 face samples.
+
+Use:
+
+- `/book-with-face-set` for new patients
+- `/register-face-set` for existing-patient re-registration
+
+## `POST /analyze-face-pose`
+
+Analyzes a live registration preview frame and reports whether it is ready to auto-capture for a target angle.
+
+```bash
+curl -X POST http://localhost:5050/analyze-face-pose \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "left",
+    "image": "data:image/jpeg;base64,..."
+  }'
+```
+
+Required fields:
+
+- `image`: base64 image string, with or without a data URI prefix
+- `target`: `forward`, `left`, or `right`
+
+Success:
+
+```json
+{
+  "ready": true,
+  "target": "left",
+  "message": "Hold still.",
+  "pose": {
+    "pitch": 1.8,
+    "yaw": -18.6,
+    "roll": 2.4
+  },
+  "quality": {
+    "face_area_ratio": 0.142,
+    "center_offset": 0.034,
+    "detection_score": 0.91,
+    "blur_score": 63.4
+  },
+  "checks": {
+    "yaw_ok": true,
+    "pitch_ok": true,
+    "roll_ok": true,
+    "centered": true,
+    "large_enough": true,
+    "detection_ok": true,
+    "sharp_enough": true
+  }
 }
 ```
 
@@ -181,12 +251,14 @@ Success:
 {
   "success": true,
   "confidence": 94.2,
+  "match_label": "forward_left_average",
+  "match_type": "derived_average",
   "token": "TKN-A1B2C3D4",
   "patient": {
     "name": "Ahmed Al Mansouri",
     "patient_id": "PAT-001",
     "appointment_id": "APT-2026-0001",
-    "appointment_time": "15 Jul 2026, 09:00 AM",
+    "appointment_time": "15/07/2026, 09:00",
     "doctor": "Dr. Sara Hassan",
     "department": "Cardiology"
   }
@@ -233,11 +305,13 @@ The highest score from those vectors becomes that patient's score. The final mat
 - `60-80%`: likely match
 - `80-100%`: strong match
 
-The current threshold is `0.45`, displayed as `45%` in dashboard calculations.
+The default threshold is `0.45`, displayed as `45%` in dashboard calculations. Override it with the `SIMILARITY_THRESHOLD` environment variable when starting the backend.
 
 ## Patient Record Shape
 
 Stored records in `backend/db/patients.json` include embeddings, but `/patients` hides them.
+
+Dates in stored records are machine-readable ISO strings. The frontend formats them as `dd/mm/yyyy, HH:mm`.
 
 ```json
 {
@@ -248,15 +322,16 @@ Stored records in `backend/db/patients.json` include embeddings, but `/patients`
   "doctor": "Dr. Sara Hassan",
   "department": "Cardiology",
   "digital_token": "TKN-A1B2C3D4",
-  "created_at": "2026-07-01T08:30:00.000000",
+  "created_at": "2026-07-01T08:30:00+00:00",
   "token_issued": false,
   "face_embeddings": [
     [0.123, -0.456],
-    [0.234, -0.567]
+    [0.234, -0.567],
+    [0.345, -0.678]
   ],
   "registered": true,
-  "registered_at": "2026-07-01T08:32:00.000000",
-  "token_issued_at": "2026-07-01T09:15:00.000000"
+  "registered_at": "2026-07-01T08:32:00+00:00",
+  "token_issued_at": "2026-07-01T09:15:00+00:00"
 }
 ```
 

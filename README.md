@@ -1,11 +1,11 @@
 # MediPass - Digital Token Appointment System
 
-A local facial-recognition appointment and check-in demo. Patients book an appointment, register one or more face photos, then check in later by camera capture or image upload to retrieve their digital token.
+A local facial-recognition appointment and check-in demo. Patients book an appointment, complete a required three-angle face registration, then check in later by camera capture or image upload to retrieve their digital token.
 
 ```text
 Patient books appointment
         |
-Register face sample(s)
+Register three face samples
         |
 Check in with camera or uploaded image
         |
@@ -26,6 +26,8 @@ The JSON database files are intentionally local-only and ignored by git:
 - `backend/db/checkin_attempts.json`
 
 They start empty unless you book patients through the app or run the demo seeder.
+
+Dates shown to users are formatted as `dd/mm/yyyy, HH:mm`. API input fields and JSON database timestamps use ISO strings internally for reliable parsing and sorting.
 
 ## Prerequisites
 
@@ -67,29 +69,38 @@ Use the React app:
 1. Open `http://localhost:5173`.
 2. Choose **Book Appointment**.
 3. Enter patient and appointment details.
-4. Register a face using camera capture or upload.
-5. The backend creates the patient, stores the face embedding, and returns the token.
+4. Complete the guided three-angle face scan: straight, slightly left, and slightly right.
+5. The backend creates the patient, stores the three face embeddings, and returns the token.
 
 You can also use the API directly:
 
+`appointment_time` is sent in ISO format because it is an API input value. The app displays appointment dates back to users as `dd/mm/yyyy, HH:mm`.
+
 ```bash
-curl -X POST http://localhost:5050/book \
+curl -X POST http://localhost:5050/book-with-face-set \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Layla Al Mazrouei",
     "doctor": "Dr. Hana Nasser",
     "department": "Pediatrics",
-    "appointment_time": "2026-07-15T15:00:00"
+    "appointment_time": "2026-07-15T15:00:00",
+    "images": [
+      "data:image/jpeg;base64,...",
+      "data:image/jpeg;base64,...",
+      "data:image/jpeg;base64,..."
+    ]
   }'
 ```
 
-Then append a face sample for that patient:
+The browser uses `/analyze-face-pose` during registration to auto-capture each angle when the face is centered, large enough, stable, and turned to the requested angle.
+
+You can also replace the three-scan face set manually for an existing patient:
 
 ```bash
-python scripts/get_embedding.py --patient_id PAT-001 --image ~/photo.jpg
+python scripts/get_embedding.py --patient_id PAT-001 --images forward.jpg left.jpg right.jpg
 ```
 
-Each registration appends a new embedding. A patient can have multiple registered face samples, for example straight, slightly left, and slightly right.
+Face registration requires exactly three samples. The old single-image registration path is disabled.
 
 ### Check In
 
@@ -118,26 +129,27 @@ Every `/verify` request appends a record to `backend/db/checkin_attempts.json`, 
 The admin dashboard is available from the main app navigation. It shows live data from the JSON files, including:
 
 - Total patients
-- Registered patients
+- Upcoming appointments
 - Tokens issued
-- Today's check-ins
+- Today's check-in attempts
+- Today's successful check-ins
 - Check-in success rate
 - Average successful and failed match confidence
 - Most common failure reason
-- Patients missing face registration
-- Average face samples per patient
 - Average days booked in advance
-- Failure reasons, check-ins over time, department breakdown, risky matches, unregistered patients, and repeated failures
+- Low-confidence successes and near-miss failures
+- Failure reasons, check-ins over time, department breakdown, risky matches, repeated failures, and clickable stat drill-down tables
 
-A patient is considered registered when `face_embedding_count > 0`.
+A patient is considered registered only when `face_embedding_count === 3`.
 
 ## API Endpoints
 
 - `GET /health`: backend health check
 - `GET /patients`: patient list for admin use, excluding raw embeddings
 - `GET /checkin-attempts`: check-in attempt log for admin analytics
-- `POST /book`: create an appointment and patient record
-- `POST /register`: append one face embedding to an existing patient
+- `POST /book-with-face-set`: create an appointment only after exactly three face scans are valid
+- `POST /analyze-face-pose`: check whether a preview frame is ready for a target registration angle
+- `POST /register-face-set`: replace an existing patient's face set with exactly three valid scans
 - `POST /verify`: verify a face, return the token on match, and log the attempt
 
 See `API.md` for request and response examples.
@@ -169,7 +181,7 @@ Useful options:
 
 ```bash
 python demo_seed/seed_from_faces.py --dry-run
-python demo_seed/seed_from_faces.py --reset-all
+python demo_seed/seed_from_faces.py --clear-all
 python demo_seed/seed_from_faces.py --clear-seeded-only
 python demo_seed/seed_from_faces.py --clear-all-only
 ```
@@ -178,20 +190,20 @@ python demo_seed/seed_from_faces.py --clear-all-only
 
 ### Similarity Threshold
 
-In `backend/face_service.py`:
+The backend reads the threshold from `SIMILARITY_THRESHOLD`, defaulting to `0.45`:
 
-```python
-SIMILARITY_THRESHOLD = 0.45
+```bash
+SIMILARITY_THRESHOLD=0.45 python face_service.py
 ```
 
 Lower values are more permissive. Higher values are stricter. Tune this with your own registration and check-in photos.
 
 ### CORS Origins
 
-In `backend/face_service.py`:
+The backend reads allowed frontend origins from `CORS_ORIGINS`, defaulting to `http://localhost:5173`:
 
-```python
-CORS(app, origins=["http://localhost:5173"])
+```bash
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 python face_service.py
 ```
 
 Add the deployed frontend origin before production use.
@@ -213,10 +225,10 @@ Add the deployed frontend origin before production use.
 
 ### Face not recognised
 
-- Confirm the patient has at least one face sample.
-- Add more samples for that patient using `/register` or the CLI.
+- Confirm the patient has exactly three face samples.
+- Re-register the full three-scan face set using `/register-face-set` or the CLI.
 - Check the match confidence in the admin dashboard.
-- Tune `SIMILARITY_THRESHOLD` if needed.
+- Tune the `SIMILARITY_THRESHOLD` environment variable if needed.
 
 ### Cannot reach the server
 
@@ -227,7 +239,7 @@ Add the deployed frontend origin before production use.
 ## File Structure
 
 ```text
-face-token-system/
+project-root/
 ├── backend/
 │   ├── db/
 │   │   ├── patients.json              # local ignored patient DB
@@ -254,7 +266,7 @@ face-token-system/
 - Face extraction depends on CPU and image size.
 - Matching is currently a linear search over each patient's real and derived face vectors, not just patients.
 - This is fine for demo and small pilot datasets.
-- For thousands of patients with multiple samples each, move to a vector index such as FAISS, HNSW, or a database with vector search.
+- For thousands of patients with seven match vectors each, move to a vector index such as FAISS, HNSW, or a database with vector search.
 
 ## Production Notes
 

@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+db/*.json
+db/*.bak-*
+demo_seed/faces/
+threshold_tuning/output/
+uploads/
+.DS_Store

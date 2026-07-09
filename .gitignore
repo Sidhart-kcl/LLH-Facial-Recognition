@@ -29,7 +29,3 @@ build/
 # Local runtime database files
 backend/db/*.json
 backend/db/*.bak-*
-
-# Local/generated image uploads
-uploads/
-backend/uploads/

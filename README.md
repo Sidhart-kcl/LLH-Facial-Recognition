@@ -158,6 +158,12 @@ See `API.md` for request and response examples.
 
 For realistic test data, use the selected VGGFace2 folders in `backend/demo_seed/faces`:
 
+Optional test faces download:
+
+- Faces folder: `https://drive.google.com/file/d/1Aanje7P3Povb9eFDx-qbOnW98_RQnQaL/view?usp=sharing`
+
+After downloading, place or extract the folders into `backend/demo_seed/faces`.
+
 ```text
 backend/demo_seed/faces/
   Person_Name/

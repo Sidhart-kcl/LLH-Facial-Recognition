@@ -15,6 +15,9 @@ import os
 import json
 import base64
 import binascii
+import re
+import tempfile
+import threading
 import uuid
 import numpy as np
 import cv2
@@ -22,38 +25,71 @@ from datetime import UTC, datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from insightface.app import FaceAnalysis
+from werkzeug.exceptions import HTTPException
 
 # ── Config ──────────────────────────────────────────────────────────────────
-DB_DIR = os.path.join(os.path.dirname(__file__), "db")
-DB_PATH = os.path.join(DB_DIR, "patients.json")
-CHECKIN_ATTEMPTS_PATH = os.path.join(DB_DIR, "checkin_attempts.json")
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+BACKEND_DIR = os.path.dirname(__file__)
+
+
+def configured_path(variable_name: str, default_path: str) -> str:
+    value = os.path.expanduser(os.getenv(variable_name, default_path))
+    return value if os.path.isabs(value) else os.path.abspath(os.path.join(BACKEND_DIR, value))
+
+
+DB_PATH = configured_path("DB_PATH", os.path.join(BACKEND_DIR, "db", "patients.json"))
+DB_DIR = os.path.dirname(DB_PATH)
+CHECKIN_ATTEMPTS_PATH = configured_path(
+    "CHECKIN_ATTEMPTS_PATH",
+    os.path.join(DB_DIR, "checkin_attempts.json"),
+)
+UPLOAD_DIR = configured_path("UPLOAD_DIR", os.path.join(BACKEND_DIR, "uploads"))
+FACE_MODEL = os.getenv("FACE_MODEL", "buffalo_l")
+INSIGHTFACE_HOME = os.path.expanduser(os.getenv("INSIGHTFACE_HOME", "~/.insightface"))
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.45"))
+REGISTRATION_SIMILARITY_THRESHOLD = float(os.getenv("REGISTRATION_SIMILARITY_THRESHOLD", "0.20"))
+MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(20 * 1024 * 1024)))
+MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))
+MAX_TEXT_LENGTH = 120
 ANGLE_SAMPLE_LABELS = ("forward", "left", "right")
 REQUIRED_FACE_SAMPLE_COUNT = 3
-POSE_YAW_SIGN = -1  # Flip to -1 if your camera/model reports left/right reversed.
+POSE_YAW_SIGN = int(os.getenv("POSE_YAW_SIGN", "-1"))
 POSE_TARGETS = {
     "forward": {"yaw": (-8, 8), "instruction": "Look straight at the camera."},
-    "left": {"yaw": (-30, -25), "instruction": "Turn slightly left."},
-    "right": {"yaw": (25, 30), "instruction": "Turn slightly right."},
+    "left": {"yaw": (-30, -20), "instruction": "Turn slightly left."},
+    "right": {"yaw": (20, 30), "instruction": "Turn slightly right."},
 }
-POSE_MAX_ABS_PITCH = 14
+POSE_MAX_ABS_PITCH = 18
 POSE_MAX_ABS_ROLL = 12
 POSE_MIN_FACE_AREA_RATIO = 0.08
 POSE_MAX_CENTER_OFFSET = 0.18
 POSE_MIN_DETECTION_SCORE = 0.65
 POSE_MIN_BLUR_SCORE = 18.0
 os.makedirs(DB_DIR, exist_ok=True)
+os.makedirs(os.path.dirname(CHECKIN_ATTEMPTS_PATH), exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+if not 0 <= SIMILARITY_THRESHOLD <= 1:
+    raise ValueError("SIMILARITY_THRESHOLD must be between 0 and 1.")
+if not -1 <= REGISTRATION_SIMILARITY_THRESHOLD <= 1:
+    raise ValueError("REGISTRATION_SIMILARITY_THRESHOLD must be between -1 and 1.")
+if MAX_REQUEST_BYTES <= 0 or MAX_IMAGE_BYTES <= 0:
+    raise ValueError("Image and request size limits must be positive integers.")
+if POSE_YAW_SIGN not in (-1, 1):
+    raise ValueError("POSE_YAW_SIGN must be either -1 or 1.")
+
+DB_LOCK = threading.RLock()
+CHECKIN_ATTEMPTS_LOCK = threading.RLock()
+MODEL_LOCK = threading.Lock()
 
 # ── InsightFace init (loads once at startup) ─────────────────────────────────
 print("🔧 Loading InsightFace model...")
-face_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+face_app = FaceAnalysis(name=FACE_MODEL, root=INSIGHTFACE_HOME, providers=["CPUExecutionProvider"])
 face_app.prepare(ctx_id=0, det_size=(640, 640))
 print("✅ InsightFace ready.")
 
 # ── Flask app ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 cors_origins = [
     origin.strip()
     for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
@@ -64,37 +100,58 @@ CORS(app, origins=cors_origins)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def load_json_database(path: str, root_key: str) -> dict:
+    """Load and validate one of the small local JSON databases."""
+    if not os.path.exists(path):
+        return {root_key: []}
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, list):
+        data = {root_key: data}
+    if not isinstance(data, dict) or not isinstance(data.get(root_key), list):
+        raise ValueError(f"{os.path.basename(path)} must contain a '{root_key}' list.")
+    return data
+
+
+def save_json_database(path: str, data: dict):
+    """Atomically replace a JSON database so interrupted writes do not corrupt it."""
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=".medipass-",
+        suffix=".json",
+        dir=os.path.dirname(path),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, path)
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def load_db():
     if not os.path.exists(DB_PATH):
         return {"patients": []}
-
-    with open(DB_PATH, "r") as f:
-        data = json.load(f)
-        # Handle both formats: list or dict
-        if isinstance(data, list):
-            return {"patients": data}
-        return data
+    return load_json_database(DB_PATH, "patients")
 
 
 def save_db(db: dict):
-    with open(DB_PATH, "w") as f:
-        json.dump(db, f, indent=2)
+    save_json_database(DB_PATH, db)
 
 
 def load_checkin_attempts():
-    if not os.path.exists(CHECKIN_ATTEMPTS_PATH):
-        return {"attempts": []}
-
-    with open(CHECKIN_ATTEMPTS_PATH, "r") as f:
-        data = json.load(f)
-        if isinstance(data, list):
-            return {"attempts": data}
-        return data
+    return load_json_database(CHECKIN_ATTEMPTS_PATH, "attempts")
 
 
 def save_checkin_attempts(attempts_db: dict):
-    with open(CHECKIN_ATTEMPTS_PATH, "w") as f:
-        json.dump(attempts_db, f, indent=2)
+    save_json_database(CHECKIN_ATTEMPTS_PATH, attempts_db)
 
 
 def utc_timestamp() -> str:
@@ -111,31 +168,31 @@ def log_checkin_attempt(
 ):
     """Append one check-in attempt to a separate analytics log."""
     try:
-        attempts_db = load_checkin_attempts()
-        attempts = attempts_db.setdefault("attempts", [])
+        with CHECKIN_ATTEMPTS_LOCK:
+            attempts_db = load_checkin_attempts()
+            attempts = attempts_db["attempts"]
+            attempt = {
+                "attempt_id": f"ATT-{uuid.uuid4().hex[:10].upper()}",
+                "timestamp": utc_timestamp(),
+                "success": success,
+                "reason": reason,
+                "confidence": confidence,
+                "threshold": SIMILARITY_THRESHOLD,
+            }
 
-        attempt = {
-            "attempt_id": f"ATT-{uuid.uuid4().hex[:10].upper()}",
-            "timestamp": utc_timestamp(),
-            "success": success,
-            "reason": reason,
-            "confidence": confidence,
-            "threshold": SIMILARITY_THRESHOLD,
-        }
+            if patient:
+                attempt.update({
+                    "patient_id": patient.get("patient_id"),
+                    "appointment_id": patient.get("appointment_id"),
+                    "doctor": patient.get("doctor"),
+                    "department": patient.get("department"),
+                })
 
-        if patient:
-            attempt.update({
-                "patient_id": patient.get("patient_id"),
-                "appointment_id": patient.get("appointment_id"),
-                "doctor": patient.get("doctor"),
-                "department": patient.get("department"),
-            })
+            if error:
+                attempt["error"] = error
 
-        if error:
-            attempt["error"] = error
-
-        attempts.append(attempt)
-        save_checkin_attempts(attempts_db)
+            attempts.append(attempt)
+            save_checkin_attempts(attempts_db)
     except Exception as exc:
         print(f"⚠️  Failed to log check-in attempt: {exc}")
 
@@ -235,19 +292,73 @@ def set_patient_embeddings(patient: dict, embeddings: list[np.ndarray]) -> int:
     return len(patient["face_embeddings"])
 
 
+def json_body() -> tuple[dict | None, tuple | None]:
+    """Return a JSON object or a consistent API error response."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, (jsonify({"success": False, "error": "A JSON object is required."}), 400)
+    return data, None
+
+
+def cleaned_text_fields(data: dict, field_names: list[str]) -> tuple[dict | None, str | None]:
+    cleaned = {}
+    for field_name in field_names:
+        value = data.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            return None, f"{field_name} is required."
+        value = value.strip()
+        if len(value) > MAX_TEXT_LENGTH:
+            return None, f"{field_name} must be {MAX_TEXT_LENGTH} characters or fewer."
+        cleaned[field_name] = value
+    return cleaned, None
+
+
+def validate_appointment_time(value: str) -> str | None:
+    pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$"
+    if not re.fullmatch(pattern, value):
+        return "appointment_time must be an ISO 8601 date and time."
+    try:
+        appointment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return "appointment_time must be a valid date and time."
+    now = datetime.now(appointment.tzinfo) if appointment.tzinfo else datetime.now()
+    if appointment <= now:
+        return "appointment_time must be in the future."
+    return None
+
+
+def validate_images(images) -> str | None:
+    if not isinstance(images, list) or len(images) != REQUIRED_FACE_SAMPLE_COUNT:
+        return f"Exactly {REQUIRED_FACE_SAMPLE_COUNT} face images are required."
+    if not all(isinstance(image, str) and image.strip() for image in images):
+        return "Every face image must be a non-empty base64 string."
+    return None
+
+
 def decode_image(b64_string: str) -> np.ndarray | None:
     """Decode base64 image string (with or without data URI prefix) to OpenCV mat."""
     if not isinstance(b64_string, str):
         return None
     if "," in b64_string:
         b64_string = b64_string.split(",", 1)[1]
+    if len(b64_string) > ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 4:
+        return None
     try:
         img_bytes = base64.b64decode(b64_string, validate=True)
     except (binascii.Error, ValueError):
         return None
+    if not img_bytes or len(img_bytes) > MAX_IMAGE_BYTES:
+        return None
     np_arr = np.frombuffer(img_bytes, dtype=np.uint8)
-    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    return img
+    try:
+        return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    except cv2.error:
+        return None
+
+
+def detect_faces(img: np.ndarray) -> list:
+    with MODEL_LOCK:
+        return face_app.get(img)
 
 
 def face_area_ratio(face, img: np.ndarray) -> float:
@@ -273,7 +384,7 @@ def blur_score(img: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def analyze_face_pose(img: np.ndarray, target: str) -> dict:
+def analyze_face_pose(img: np.ndarray, target: str, faces: list | None = None) -> dict:
     if img is None:
         return {"ready": False, "message": "Could not decode image."}
 
@@ -281,7 +392,7 @@ def analyze_face_pose(img: np.ndarray, target: str) -> dict:
     if not target_config:
         return {"ready": False, "message": f"Unknown target angle: {target}."}
 
-    faces = face_app.get(img)
+    faces = detect_faces(img) if faces is None else faces
     if not faces:
         return {"ready": False, "message": "No face detected.", "target": target}
     if len(faces) > 1:
@@ -354,19 +465,80 @@ def extract_embedding(img):
     if img is None:
         return None, "Could not decode image."
 
-    faces = face_app.get(img)
+    faces = detect_faces(img)
 
     if not faces:
         return None, "No face detected. Please look directly at the camera."
 
     if len(faces) > 1:
-        faces = sorted(
-            faces,
-            key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
-            reverse=True,
-        )
+        return None, "Multiple faces detected. Only one face should be visible."
 
-    return faces[0].normed_embedding, None
+    embedding = np.asarray(faces[0].normed_embedding, dtype=np.float32)
+    if embedding.ndim != 1 or not embedding.size or not np.all(np.isfinite(embedding)):
+        return None, "Could not extract a valid face embedding."
+    return embedding, None
+
+
+def extract_validated_face_set(images: list[str]) -> tuple[list[np.ndarray] | None, dict | None]:
+    """Validate forward/left/right quality and return one embedding per image."""
+    embeddings = []
+    for index, (target, b64_image) in enumerate(zip(ANGLE_SAMPLE_LABELS, images), start=1):
+        img = decode_image(b64_image)
+        if img is None:
+            return None, {
+                "error": f"Face image {index} failed: Could not decode image.",
+                "failed_image_index": index,
+            }
+
+        faces = detect_faces(img)
+        analysis = analyze_face_pose(img, target, faces)
+        if not analysis.get("ready"):
+            return None, {
+                "error": f"Face image {index} ({target}) failed: {analysis['message']}",
+                "failed_image_index": index,
+                "target": target,
+                "analysis": analysis,
+            }
+
+        embedding = np.asarray(faces[0].normed_embedding, dtype=np.float32)
+        if embedding.ndim != 1 or not embedding.size or not np.all(np.isfinite(embedding)):
+            return None, {
+                "error": f"Face image {index} failed: Could not extract a valid face embedding.",
+                "failed_image_index": index,
+            }
+        embeddings.append(embedding)
+
+    pair_scores = [
+        cosine_similarity(embeddings[first], embeddings[second])
+        for first, second in ((0, 1), (0, 2), (1, 2))
+    ]
+    if min(pair_scores) < REGISTRATION_SIMILARITY_THRESHOLD:
+        return None, {
+            "error": "The three face images do not appear to show the same person.",
+            "pair_confidences": [round(score * 100, 1) for score in pair_scores],
+        }
+
+    return embeddings, None
+
+
+def next_patient_number(patients: list[dict]) -> int:
+    numbers = []
+    for patient in patients:
+        match = re.fullmatch(r"PAT-(\d+)", str(patient.get("patient_id", "")))
+        if match:
+            numbers.append(int(match.group(1)))
+    return max(numbers, default=0) + 1
+
+
+def booking_response(patient: dict) -> dict:
+    return {
+        "success": True,
+        "patient_id": patient["patient_id"],
+        "appointment_id": patient["appointment_id"],
+        "digital_token": patient["digital_token"],
+        "embedding_count": len(patient_embedding_vectors(patient)),
+        "message": "Appointment booked with three registered face scans.",
+    }
 
 
 def find_best_match(embedding, patients):
@@ -393,6 +565,21 @@ def find_best_match(embedding, patients):
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
+@app.errorhandler(Exception)
+def unexpected_error(error):
+    """Keep API errors JSON-shaped without exposing server internals."""
+    if isinstance(error, HTTPException):
+        return jsonify({"success": False, "error": error.description}), error.code
+    app.logger.exception("Unhandled API error", exc_info=error)
+    return jsonify({"success": False, "error": "Internal server error."}), 500
+
+@app.errorhandler(413)
+def request_too_large(_error):
+    return jsonify({
+        "success": False,
+        "error": f"Request is too large. Maximum size is {MAX_REQUEST_BYTES // (1024 * 1024)} MB.",
+    }), 413
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "timestamp": utc_timestamp()})
@@ -400,15 +587,14 @@ def health():
 
 @app.route("/patients", methods=["GET"])
 def list_patients():
-    db = load_db()
-    # Handle both formats
-    patients_list = db if isinstance(db, list) else db.get("patients", [])
+    with DB_LOCK:
+        patients_list = load_db()["patients"]
     safe = []
     for patient in patients_list:
         safe_patient = {
             k: v
             for k, v in patient.items()
-            if k not in ("face_embeddings", "face_embedding")
+            if k not in ("face_embeddings", "face_embedding", "booking_request_id")
         }
         face_embedding_count = len(patient_embedding_vectors(patient))
         safe_patient["face_embedding_count"] = face_embedding_count
@@ -419,8 +605,9 @@ def list_patients():
 
 @app.route("/checkin-attempts", methods=["GET"])
 def list_checkin_attempts():
-    attempts_db = load_checkin_attempts()
-    return jsonify({"attempts": attempts_db.get("attempts", [])})
+    with CHECKIN_ATTEMPTS_LOCK:
+        attempts = load_checkin_attempts()["attempts"]
+    return jsonify({"attempts": attempts})
 
 
 @app.route("/analyze-face-pose", methods=["POST"])
@@ -430,8 +617,10 @@ def analyze_face_pose_route():
     Body: { "image": "<base64 image string>", "target": "forward|left|right" }
     Returns pose/quality readiness for automatic registration capture.
     """
-    data = request.get_json(force=True)
-    if not data or "image" not in data:
+    data, error_response = json_body()
+    if error_response:
+        return error_response
+    if "image" not in data:
         return jsonify({"ready": False, "error": "No image provided."}), 400
 
     target = data.get("target", "forward")
@@ -447,8 +636,11 @@ def verify_face():
     Body: { "image": "<base64 image string>" }
     Returns digital token if face matches a registered patient.
     """
-    data = request.get_json(force=True)
-    if not data or "image" not in data:
+    data, error_response = json_body()
+    if error_response:
+        log_checkin_attempt(success=False, reason="invalid_request", error="A JSON object is required.")
+        return error_response
+    if "image" not in data:
         log_checkin_attempt(
             success=False,
             reason="missing_image",
@@ -460,7 +652,12 @@ def verify_face():
     img = decode_image(data["image"])
     embedding, err = extract_embedding(img)
     if err:
-        reason = "no_face" if err.startswith("No face detected") else "invalid_image"
+        if err.startswith("No face detected"):
+            reason = "no_face"
+        elif err.startswith("Multiple faces detected"):
+            reason = "multiple_faces"
+        else:
+            reason = "invalid_image"
         log_checkin_attempt(
             success=False,
             reason=reason,
@@ -469,9 +666,8 @@ def verify_face():
         return jsonify({"success": False, "error": err}), 422
 
     # Match against DB
-    db = load_db()
-    # Handle both formats: list [] or dict with "patients" key
-    patients_list = db if isinstance(db, list) else db.get("patients", [])
+    with DB_LOCK:
+        patients_list = load_db()["patients"]
     patient, score, match_label = find_best_match(embedding, patients_list)
     confidence = round(score * 100, 1)
     if patient is None or score < SIMILARITY_THRESHOLD:
@@ -489,13 +685,22 @@ def verify_face():
         }), 404
 
     # Mark token as issued
-    for p in db["patients"]:
-        if p["patient_id"] == patient["patient_id"]:
-            p["token_issued"] = True
-            p["token_issued_at"] = utc_timestamp()
-    save_db(db)
+    with DB_LOCK:
+        # Reload before writing so a concurrent booking is not overwritten.
+        db = load_db()
+        for p in db["patients"]:
+            if p.get("patient_id") == patient.get("patient_id"):
+                p["token_issued"] = True
+                p["token_issued_at"] = utc_timestamp()
+                patient = p
+                break
+        save_db(db)
 
-    appt_time = datetime.fromisoformat(patient["appointment_time"])
+    try:
+        appt_time = datetime.fromisoformat(patient["appointment_time"].replace("Z", "+00:00"))
+        formatted_appointment_time = appt_time.strftime("%d/%m/%Y, %H:%M")
+    except (AttributeError, TypeError, ValueError):
+        formatted_appointment_time = str(patient.get("appointment_time") or "Not set")
     log_checkin_attempt(
         success=True,
         reason="matched",
@@ -513,7 +718,7 @@ def verify_face():
             "name": patient["name"],
             "patient_id": patient["patient_id"],
             "appointment_id": patient["appointment_id"],
-            "appointment_time": appt_time.strftime("%d/%m/%Y, %H:%M"),
+            "appointment_time": formatted_appointment_time,
             "doctor": patient["doctor"],
             "department": patient["department"],
         },
@@ -540,42 +745,38 @@ def register_face_set():
     Body: { "patient_id": "PAT-001", "images": ["<base64>", "<base64>", "<base64>"] }
     Replaces a patient's face embeddings with exactly three validated samples.
     """
-    data = request.get_json(force=True)
+    data, error_response = json_body()
+    if error_response:
+        return error_response
     patient_id = data.get("patient_id")
     images = data.get("images")
 
-    if not patient_id or not isinstance(images, list):
+    if not isinstance(patient_id, str) or not patient_id.strip():
         return jsonify({"success": False, "error": "patient_id and images are required."}), 400
+    patient_id = patient_id.strip()
 
-    if len(images) != REQUIRED_FACE_SAMPLE_COUNT:
-        return jsonify({
-            "success": False,
-            "error": f"Exactly {REQUIRED_FACE_SAMPLE_COUNT} face images are required.",
-        }), 400
+    image_error = validate_images(images)
+    if image_error:
+        return jsonify({"success": False, "error": image_error}), 400
 
-    db = load_db()
-    patient = next((p for p in db["patients"] if p["patient_id"] == patient_id), None)
+    with DB_LOCK:
+        patient = next((p for p in load_db()["patients"] if p.get("patient_id") == patient_id), None)
     if not patient:
         return jsonify({"success": False, "error": f"Patient {patient_id} not found."}), 404
 
-    embeddings = []
-    for index, b64_image in enumerate(images, start=1):
-        img = decode_image(b64_image)
-        embedding, err = extract_embedding(img)
-        if err:
-            return jsonify({
-                "success": False,
-                "error": f"Face image {index} failed: {err}",
-                "failed_image_index": index,
-            }), 422
-        embeddings.append(embedding)
+    embeddings, face_error = extract_validated_face_set(images)
+    if face_error:
+        return jsonify({"success": False, **face_error}), 422
 
-    for p in db["patients"]:
-        if p["patient_id"] == patient_id:
-            embedding_count = set_patient_embeddings(p, embeddings)
-            p["registered"] = True
-            p["registered_at"] = utc_timestamp()
-    save_db(db)
+    with DB_LOCK:
+        db = load_db()
+        patient = next((p for p in db["patients"] if p.get("patient_id") == patient_id), None)
+        if not patient:
+            return jsonify({"success": False, "error": f"Patient {patient_id} not found."}), 404
+        embedding_count = set_patient_embeddings(patient, embeddings)
+        patient["registered"] = True
+        patient["registered_at"] = utc_timestamp()
+        save_db(db)
 
     return jsonify({
         "success": True,
@@ -610,67 +811,88 @@ def book_with_face_set():
     }
     Creates a patient only after exactly three face embeddings are extracted.
     """
-    data = request.get_json(force=True)
+    data, error_response = json_body()
+    if error_response:
+        return error_response
+
     required = ["name", "doctor", "department", "appointment_time"]
-    missing = [f for f in required if f not in data]
-    if missing:
-        return jsonify({"success": False, "error": f"Missing fields: {missing}"}), 400
+    fields, field_error = cleaned_text_fields(data, required)
+    if field_error:
+        return jsonify({"success": False, "error": field_error}), 400
+
+    appointment_error = validate_appointment_time(fields["appointment_time"])
+    if appointment_error:
+        return jsonify({"success": False, "error": appointment_error}), 400
 
     images = data.get("images")
-    if not isinstance(images, list) or len(images) != REQUIRED_FACE_SAMPLE_COUNT:
-        return jsonify({
-            "success": False,
-            "error": f"Exactly {REQUIRED_FACE_SAMPLE_COUNT} face images are required.",
-        }), 400
+    image_error = validate_images(images)
+    if image_error:
+        return jsonify({"success": False, "error": image_error}), 400
 
-    embeddings = []
-    for index, b64_image in enumerate(images, start=1):
-        img = decode_image(b64_image)
-        embedding, err = extract_embedding(img)
-        if err:
-            return jsonify({
-                "success": False,
-                "error": f"Face image {index} failed: {err}",
-                "failed_image_index": index,
-            }), 422
-        embeddings.append(embedding)
+    booking_request_id = data.get("booking_request_id")
+    if booking_request_id is not None:
+        if not isinstance(booking_request_id, str) or not booking_request_id.strip():
+            return jsonify({"success": False, "error": "booking_request_id must be a non-empty string."}), 400
+        booking_request_id = booking_request_id.strip()
+        if len(booking_request_id) > MAX_TEXT_LENGTH:
+            return jsonify({"success": False, "error": "booking_request_id is too long."}), 400
 
-    db = load_db()
-    patient_count = len(db["patients"]) + 1
-    patient_id = f"PAT-{patient_count:03d}"
-    appointment_id = f"APT-{datetime.now(UTC).strftime('%Y')}-{patient_count:04d}"
+        with DB_LOCK:
+            existing = next(
+                (p for p in load_db()["patients"] if p.get("booking_request_id") == booking_request_id),
+                None,
+            )
+        if existing:
+            return jsonify(booking_response(existing))
+
+    embeddings, face_error = extract_validated_face_set(images)
+    if face_error:
+        return jsonify({"success": False, **face_error}), 422
+
     token = f"TKN-{uuid.uuid4().hex[:8].upper()}"
+    with DB_LOCK:
+        db = load_db()
+        # Two same-key requests can finish face processing together; check again
+        # inside the write lock before creating a record.
+        if booking_request_id:
+            existing = next(
+                (p for p in db["patients"] if p.get("booking_request_id") == booking_request_id),
+                None,
+            )
+            if existing:
+                return jsonify(booking_response(existing))
 
-    new_patient = {
-        "patient_id": patient_id,
-        "name": data["name"],
-        "appointment_id": appointment_id,
-        "appointment_time": data["appointment_time"],
-        "doctor": data["doctor"],
-        "department": data["department"],
-        "digital_token": token,
-        "created_at": utc_timestamp(),
-        "token_issued": False,
-        "face_embeddings": [embedding.tolist() for embedding in embeddings],
-        "registered": True,
-        "registered_at": utc_timestamp(),
-    }
+        patient_number = next_patient_number(db["patients"])
+        patient_id = f"PAT-{patient_number:03d}"
+        appointment_id = f"APT-{datetime.now(UTC).strftime('%Y')}-{patient_number:04d}"
+        timestamp = utc_timestamp()
+        new_patient = {
+            "patient_id": patient_id,
+            "name": fields["name"],
+            "appointment_id": appointment_id,
+            "appointment_time": fields["appointment_time"],
+            "doctor": fields["doctor"],
+            "department": fields["department"],
+            "digital_token": token,
+            "created_at": timestamp,
+            "token_issued": False,
+            "face_embeddings": [embedding.tolist() for embedding in embeddings],
+            "registered": True,
+            "registered_at": timestamp,
+        }
+        if booking_request_id:
+            new_patient["booking_request_id"] = booking_request_id
 
-    db["patients"].append(new_patient)
-    save_db(db)
+        db["patients"].append(new_patient)
+        save_db(db)
 
-    return jsonify({
-        "success": True,
-        "patient_id": patient_id,
-        "appointment_id": appointment_id,
-        "digital_token": token,
-        "embedding_count": REQUIRED_FACE_SAMPLE_COUNT,
-        "message": "Appointment booked with three registered face scans.",
-    })
+    return jsonify(booking_response(new_patient))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("🚀 Starting Face Token Service on http://localhost:5050")
+    host = os.getenv("FLASK_HOST", "0.0.0.0")
+    port = int(os.getenv("FLASK_PORT", "5050"))
+    print(f"🚀 Starting Face Token Service on {host}:{port}")
     debug = os.getenv("FLASK_DEBUG", "False").lower() in ("1", "true", "yes")
-    app.run(host="0.0.0.0", port=5050, debug=debug)
+    app.run(host=host, port=port, debug=debug)

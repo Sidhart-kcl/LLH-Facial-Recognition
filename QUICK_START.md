@@ -1,5 +1,7 @@
 # MediPass Quick Start Guide
 
+Requires Python 3.10+ and a supported Node.js LTS release (22.12+; Node.js 24 recommended).
+
 ## 5-Minute Setup
 
 ### Backend
@@ -20,7 +22,7 @@ In a second terminal:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -148,7 +150,8 @@ curl -X POST http://localhost:5050/book-with-face-set \
     "name": "John Doe",
     "doctor": "Dr. Smith",
     "department": "Cardiology",
-    "appointment_time": "2026-07-20T10:00:00",
+    "appointment_time": "2026-09-20T10:00:00",
+    "booking_request_id": "example-booking-001",
     "images": [
       "data:image/jpeg;base64,...",
       "data:image/jpeg;base64,...",
@@ -182,11 +185,23 @@ curl -X POST http://localhost:5050/verify \
 
 See `API.md` for the full reference.
 
+`booking_request_id` is optional for API clients but strongly recommended. Reusing it returns the original booking instead of creating a duplicate after a retry.
+
+## Automated Checks
+
+From the project root:
+
+```bash
+backend/venv/bin/python -m unittest discover -s backend/tests -v
+cd frontend && npm run lint && npm run build
+```
+
 ## Troubleshooting
 
 | Issue | Solution |
 | --- | --- |
 | Camera access denied | Allow camera in browser settings. Use HTTPS outside localhost. |
+| Left/right prompts reversed | Flip `POSE_YAW_SIGN` between `-1` and `1`, restart the backend, and retest that camera. |
 | No face detected | Use a clear, well-lit image with one visible face. |
 | Face not recognised | Register the patient with exactly three face samples or tune the threshold. |
 | Cannot reach server | Confirm `face_service.py` is running on port `5050`. |

@@ -11,21 +11,31 @@ REM Check Python
 echo ✓ Checking Python...
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ❌ Python not found. Please install Python 3.9+
+    echo ❌ Python not found. Please install Python 3.10+
     exit /b 1
 )
 for /f "tokens=2" %%i in ('python --version 2^>^&1') do set PYTHON_VERSION=%%i
 echo   Python %PYTHON_VERSION% found
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"
+if %errorlevel% neq 0 (
+    echo ❌ Python 3.10 or newer is required
+    exit /b 1
+)
 
 REM Check Node
 echo ✓ Checking Node.js...
 node --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ❌ Node.js not found. Please install Node.js 18+
+    echo ❌ Node.js not found. Please install a supported Node.js LTS release ^(22.12+^)
     exit /b 1
 )
 for /f %%i in ('node --version') do set NODE_VERSION=%%i
 echo   Node %NODE_VERSION% found
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)"
+if %errorlevel% neq 0 (
+    echo ❌ Node.js 22.12 or newer is required
+    exit /b 1
+)
 
 REM Backend setup
 echo.
@@ -41,6 +51,7 @@ echo   Activating virtual environment...
 call venv\Scripts\activate.bat
 
 echo   Installing dependencies...
+python -m pip install -q --upgrade "pip>=26.1.2,<27"
 pip install -q -r requirements.txt
 
 echo   ✅ Backend ready
@@ -51,12 +62,8 @@ echo.
 echo 📦 Setting up frontend...
 cd frontend
 
-if not exist "node_modules" (
-    echo   Installing dependencies...
-    call npm install --quiet
-) else (
-    echo   Dependencies already installed
-)
+echo   Installing locked dependencies...
+call npm ci --quiet
 
 echo   ✅ Frontend ready
 cd ..

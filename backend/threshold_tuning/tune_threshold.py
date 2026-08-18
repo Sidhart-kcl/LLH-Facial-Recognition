@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,8 @@ DEFAULT_FACES_DIR = BACKEND_DIR / "demo_seed" / "faces"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 SELECTED_STEMS = ("forward", "left", "right")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+CACHE_VERSION = 2  # Increment when face-selection or embedding rules change.
+REGISTRATION_SIMILARITY_THRESHOLD = float(os.getenv("REGISTRATION_SIMILARITY_THRESHOLD", "0.20"))
 
 
 @dataclass(frozen=True)
@@ -140,11 +143,13 @@ def load_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
     if not cache_path.exists():
         return {}
 
-    data = np.load(cache_path, allow_pickle=False)
-    paths = data["paths"]
-    mtimes = data["mtimes"]
-    sizes = data["sizes"]
-    embeddings = data["embeddings"]
+    with np.load(cache_path, allow_pickle=False) as data:
+        if "version" not in data or int(data["version"][0]) != CACHE_VERSION:
+            return {}
+        paths = data["paths"].copy()
+        mtimes = data["mtimes"].copy()
+        sizes = data["sizes"].copy()
+        embeddings = data["embeddings"].copy()
 
     cache: dict[str, dict[str, Any]] = {}
     for index, raw_path in enumerate(paths):
@@ -168,13 +173,18 @@ def save_cache(cache_path: Path, cache: dict[str, dict[str, Any]]) -> None:
         mtimes=mtimes,
         sizes=sizes,
         embeddings=embeddings,
+        version=np.array([CACHE_VERSION], dtype=np.int64),
     )
 
 
 def load_face_model():
     from insightface.app import FaceAnalysis
 
-    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+    app = FaceAnalysis(
+        name=os.getenv("FACE_MODEL", "buffalo_l"),
+        root=os.path.expanduser(os.getenv("INSIGHTFACE_HOME", "~/.insightface")),
+        providers=["CPUExecutionProvider"],
+    )
     app.prepare(ctx_id=0, det_size=(640, 640))
     return app
 
@@ -191,11 +201,7 @@ def extract_embedding(face_app, image_path: Path) -> np.ndarray | None:
         return None
 
     if len(faces) > 1:
-        faces = sorted(
-            faces,
-            key=lambda face: (face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]),
-            reverse=True,
-        )
+        return None
 
     return normalize(faces[0].normed_embedding.astype(np.float32))
 
@@ -391,8 +397,21 @@ def run(args: argparse.Namespace) -> None:
             print(f"Skipping {identity.name}: one or more registration images had no face.")
             continue
 
+        normalized_registration = [
+            normalize(embedding)
+            for embedding in registration_embeddings
+            if embedding is not None
+        ]
+        pair_scores = [
+            float(np.dot(normalized_registration[first], normalized_registration[second]))
+            for first, second in ((0, 1), (0, 2), (1, 2))
+        ]
+        if min(pair_scores) < REGISTRATION_SIMILARITY_THRESHOLD:
+            print(f"Skipping {identity.name}: registration face set is inconsistent.")
+            continue
+
         usable_identities.append(identity)
-        for label, vector in match_vectors([embedding for embedding in registration_embeddings if embedding is not None]):
+        for label, vector in match_vectors(normalized_registration):
             candidate_vectors.append(vector)
             candidate_people.append(identity.name)
             candidate_identity_indexes.append(identity.index)
@@ -538,6 +557,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--threshold-step must be positive.")
     if args.threshold_start >= args.threshold_end:
         parser.error("--threshold-start must be lower than --threshold-end.")
+    if not 0 <= args.threshold_start <= 1 or not 0 <= args.threshold_end <= 1:
+        parser.error("Threshold bounds must be between 0 and 1.")
 
     return args
 

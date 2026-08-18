@@ -15,6 +15,11 @@ const formatDateTime = (value) => {
   return Number.isNaN(date.getTime()) ? "Not set" : DATE_TIME_FORMATTER.format(date);
 };
 
+const createBookingRequestId = () => {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `booking-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
+
 const FIELD_LABELS = {
   name: "name",
   doctor: "doctor",
@@ -58,7 +63,7 @@ const parseAppointmentDate = (value) => {
 // ── Icons ──────────────────────────────────────────────────────────────────
 const Icon = ({ d, size = 20 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d={d} />
   </svg>
 );
@@ -69,14 +74,14 @@ const IconToken = () => <Icon d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l1
 const IconUser = () => <Icon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" />;
 
 // ── Step 1: Patient Info ───────────────────────────────────────────────────
-function StepInfo({ onNext }) {
-  const [form, setForm] = useState({
-    name: "",
-    doctor: "",
-    department: "",
-    appointment_date: "",
-    appointment_clock: "",
-  });
+function StepInfo({ onNext, initialValues }) {
+  const [form, setForm] = useState(() => ({
+    name: initialValues?.name || "",
+    doctor: initialValues?.doctor || "",
+    department: initialValues?.department || "",
+    appointment_date: initialValues?.appointment_date || "",
+    appointment_clock: initialValues?.appointment_clock || "",
+  }));
   const [error, setError] = useState(null);
 
   const handleChange = (e) => {
@@ -102,11 +107,19 @@ function StepInfo({ onNext }) {
       return;
     }
 
+    const appointmentTime = `${appointmentDate.year}-${appointmentDate.month}-${appointmentDate.day}T${form.appointment_clock}`;
+    if (new Date(appointmentTime).getTime() <= Date.now()) {
+      setError("Appointment date and time must be in the future.");
+      return;
+    }
+
     onNext({
-      name: form.name,
-      doctor: form.doctor,
+      name: form.name.trim(),
+      doctor: form.doctor.trim(),
       department: form.department,
-      appointment_time: `${appointmentDate.year}-${appointmentDate.month}-${appointmentDate.day}T${form.appointment_clock}`,
+      appointment_time: appointmentTime,
+      appointment_date: form.appointment_date,
+      appointment_clock: form.appointment_clock,
     });
   };
 
@@ -122,8 +135,9 @@ function StepInfo({ onNext }) {
 
       <form onSubmit={handleSubmit} className="booking-form">
         <div className="form-group">
-          <label><IconUser /> Your Name</label>
+          <label htmlFor="patient-name"><IconUser /> Your Name</label>
           <input
+            id="patient-name"
             type="text"
             name="name"
             placeholder="John Doe"
@@ -134,8 +148,9 @@ function StepInfo({ onNext }) {
         </div>
 
         <div className="form-group">
-          <label>Doctor</label>
+          <label htmlFor="doctor-name">Doctor</label>
           <input
+            id="doctor-name"
             type="text"
             name="doctor"
             placeholder="Dr. Sarah Smith"
@@ -146,8 +161,9 @@ function StepInfo({ onNext }) {
         </div>
 
         <div className="form-group">
-          <label>Department</label>
+          <label htmlFor="department">Department</label>
           <select
+            id="department"
             name="department"
             value={form.department}
             onChange={handleChange}
@@ -164,10 +180,11 @@ function StepInfo({ onNext }) {
         </div>
 
         <div className="form-group">
-          <label><IconCalendar /> Appointment Date And Time</label>
+          <label htmlFor="appointment-date"><IconCalendar /> Appointment Date And Time</label>
           <div className="date-time-row">
             <input
               type="text"
+              id="appointment-date"
               name="appointment_date"
               placeholder="dd/mm/yyyy"
               inputMode="numeric"
@@ -178,6 +195,7 @@ function StepInfo({ onNext }) {
             />
             <input
               type="time"
+              aria-label="Appointment time"
               name="appointment_clock"
               value={form.appointment_clock}
               onChange={handleChange}
@@ -186,7 +204,7 @@ function StepInfo({ onNext }) {
           </div>
         </div>
 
-        {error && <div className="error-message">{error}</div>}
+        {error && <div className="error-message" role="alert">{error}</div>}
 
         <button type="submit" className="btn-primary">
           Next: Register Face →
@@ -219,37 +237,38 @@ function StepFaceCapture({ onNext, onBack }) {
     message: "Starting camera...",
   });
   const [complete, setComplete] = useState(false);
+  const [stableReadyCount, setStableReadyCount] = useState(0);
 
   const currentStep = FACE_SCAN_STEPS[currentIndex];
 
   useEffect(() => {
     let stream;
+    let cancelled = false;
     (async () => {
       try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error("Camera API unavailable");
+        }
         stream = await navigator.mediaDevices.getUserMedia({
           video: { width: 640, height: 480, facingMode: "user" },
         });
-        if (videoRef.current) {
+        if (!cancelled && videoRef.current) {
           videoRef.current.srcObject = stream;
           setStreaming(true);
+        } else {
+          stream.getTracks().forEach(track => track.stop());
         }
-      } catch (e) {
-        setCamErr("Camera access denied. Please allow camera access to register your face.");
+      } catch {
+        if (!cancelled) {
+          setCamErr("Camera is unavailable or access was denied. Please allow camera access to register your face.");
+        }
       }
     })();
-    return () => stream?.getTracks().forEach(t => t.stop());
+    return () => {
+      cancelled = true;
+      stream?.getTracks().forEach(t => t.stop());
+    };
   }, []);
-
-  useEffect(() => {
-    stableReadyRef.current = 0;
-    captureLockRef.current = false;
-    if (!complete) {
-      setPoseStatus({
-        ready: false,
-        message: currentStep?.instruction || "Registration complete",
-      });
-    }
-  }, [currentIndex, currentStep, complete]);
 
   const frameToImage = useCallback((quality = 0.82, scale = 1) => {
     const video = videoRef.current;
@@ -272,6 +291,7 @@ function StepFaceCapture({ onNext, onBack }) {
 
     captureLockRef.current = true;
     stableReadyRef.current = 0;
+    setStableReadyCount(0);
 
     setCaptures(prev => {
       const next = [
@@ -288,7 +308,13 @@ function StepFaceCapture({ onNext, onBack }) {
         setComplete(true);
         setPoseStatus({ ready: true, message: "All face angles captured." });
       } else {
-        setCurrentIndex(next.length);
+        const nextIndex = next.length;
+        captureLockRef.current = false;
+        setCurrentIndex(nextIndex);
+        setPoseStatus({
+          ready: false,
+          message: FACE_SCAN_STEPS[nextIndex].instruction,
+        });
       }
 
       return next;
@@ -318,14 +344,17 @@ function StepFaceCapture({ onNext, onBack }) {
 
       if (data.ready) {
         stableReadyRef.current += 1;
+        setStableReadyCount(stableReadyRef.current);
         if (stableReadyRef.current >= 3) {
           captureCurrentStep(data);
         }
       } else {
         stableReadyRef.current = 0;
+        setStableReadyCount(0);
       }
     } catch {
       stableReadyRef.current = 0;
+      setStableReadyCount(0);
       setPoseStatus({
         ready: false,
         message: "Cannot analyze face pose. Is backend running on port 5050?",
@@ -351,6 +380,7 @@ function StepFaceCapture({ onNext, onBack }) {
 
   const resetScans = () => {
     stableReadyRef.current = 0;
+    setStableReadyCount(0);
     captureLockRef.current = false;
     setCaptures([]);
     setCurrentIndex(0);
@@ -405,7 +435,7 @@ function StepFaceCapture({ onNext, onBack }) {
                   <span>{poseStatus.message}</span>
                   {!complete && (
                     <small>
-                      Stability {Math.min(stableReadyRef.current, 3)}/3
+                      Stability {Math.min(stableReadyCount, 3)}/3
                       {poseStatus.pose ? ` • yaw ${poseStatus.pose.yaw}` : ""}
                     </small>
                   )}
@@ -455,12 +485,18 @@ function StepFaceCapture({ onNext, onBack }) {
 }
 
 // ── Step 3: Confirmation with Token ────────────────────────────────────────
-function StepConfirmation({ form, faceCaptures, onComplete, onRetry }) {
+function StepConfirmation({ form, faceCaptures, bookingRequestId, onComplete, onRetry }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
+  const requestStartedRef = useRef(false);
 
   useEffect(() => {
+    // React StrictMode intentionally re-runs effects in development. Keep this
+    // state-changing request single-shot; the backend also honors the request ID.
+    if (requestStartedRef.current) return;
+    requestStartedRef.current = true;
+
     const bookAndRegister = async () => {
       try {
         setLoading(true);
@@ -470,7 +506,11 @@ function StepConfirmation({ form, faceCaptures, onComplete, onRetry }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            ...form,
+            name: form.name,
+            doctor: form.doctor,
+            department: form.department,
+            appointment_time: form.appointment_time,
+            booking_request_id: bookingRequestId,
             images: faceCaptures.map(capture => capture.image),
           }),
         });
@@ -498,7 +538,7 @@ function StepConfirmation({ form, faceCaptures, onComplete, onRetry }) {
     };
 
     bookAndRegister();
-  }, [form, faceCaptures]);
+  }, [bookingRequestId, form, faceCaptures]);
 
   if (loading) {
     return (
@@ -618,15 +658,17 @@ function StepConfirmation({ form, faceCaptures, onComplete, onRetry }) {
 }
 
 // ── Main Booking Component ────────────────────────────────────────────────
-export default function BookingFlow({ onComplete }) {
+export default function BookingFlow({ onComplete, onBack }) {
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState(null);
   const [faceCaptures, setFaceCaptures] = useState(null);
+  const [bookingRequestId, setBookingRequestId] = useState(createBookingRequestId);
 
   const resetFlow = () => {
     setStep(1);
     setFormData(null);
     setFaceCaptures(null);
+    setBookingRequestId(createBookingRequestId());
   };
 
   return (
@@ -634,6 +676,7 @@ export default function BookingFlow({ onComplete }) {
       <style>{styles}</style>
       <div className="booking-shell">
         <header className="booking-header">
+          <button type="button" className="booking-back-btn" onClick={onBack}>← Back to menu</button>
           <h1>🏥 MediPass Booking</h1>
           <p>Book appointment • Register face • Get digital token</p>
         </header>
@@ -641,6 +684,7 @@ export default function BookingFlow({ onComplete }) {
         <main className="booking-main">
           {step === 1 && (
             <StepInfo
+              initialValues={formData}
               onNext={(data) => {
                 setFormData(data);
                 setStep(2);
@@ -662,6 +706,7 @@ export default function BookingFlow({ onComplete }) {
             <StepConfirmation
               form={formData}
               faceCaptures={faceCaptures}
+              bookingRequestId={bookingRequestId}
               onComplete={() => {
                 resetFlow();
                 onComplete?.();
@@ -672,7 +717,7 @@ export default function BookingFlow({ onComplete }) {
         </main>
 
         <footer className="booking-footer">
-          Your face is securely registered • No data sent to cloud
+          Face images are converted to embeddings by the configured backend
         </footer>
       </div>
     </>
@@ -689,10 +734,24 @@ const styles = `
   }
 
   .booking-header {
+    position: relative;
     background: rgba(3, 7, 18, 0.9);
     border-bottom: 1px solid #1e293b;
     padding: 24px;
     text-align: center;
+  }
+
+  .booking-back-btn {
+    position: absolute;
+    left: 24px;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    background: transparent;
+    color: #cbd5e1;
+    padding: 8px 12px;
+    cursor: pointer;
   }
 
   .booking-header h1 {
@@ -1303,7 +1362,8 @@ const styles = `
 
   @media (max-width: 540px) {
     .step-container { padding: 20px; }
-    .booking-header { padding: 16px; }
+    .booking-header { padding: 58px 16px 16px; }
     .booking-header h1 { font-size: 22px; }
+    .booking-back-btn { left: 16px; top: 16px; transform: none; }
   }
 `;

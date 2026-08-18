@@ -83,14 +83,16 @@ Common `reason` values:
 - `below_threshold`
 - `no_registered_embeddings`
 - `no_face`
+- `multiple_faces`
 - `invalid_image`
 - `missing_image`
+- `invalid_request`
 
 ## `POST /book-with-face-set`
 
 Creates a patient appointment and digital token only after exactly three face images are validated. This prevents patient records with partial face registrations.
 
-`appointment_time` is an API input value and should be sent as an ISO-style datetime string. The frontend displays it back to users as `dd/mm/yyyy, HH:mm`.
+`appointment_time` is an API input value and must be a valid future ISO 8601 date and time. The frontend displays it back to users as `dd/mm/yyyy, HH:mm`.
 
 ```bash
 curl -X POST http://localhost:5050/book-with-face-set \
@@ -99,7 +101,8 @@ curl -X POST http://localhost:5050/book-with-face-set \
     "name": "Layla Al Mazrouei",
     "doctor": "Dr. Hana Nasser",
     "department": "Pediatrics",
-    "appointment_time": "2026-07-15T15:00:00",
+    "appointment_time": "2026-09-15T15:00:00",
+    "booking_request_id": "booking-7cbb3fd1",
     "images": [
       "data:image/jpeg;base64,...",
       "data:image/jpeg;base64,...",
@@ -115,6 +118,12 @@ Required fields:
 - `department`
 - `appointment_time`
 - `images`: exactly three base64 image strings
+
+Optional but recommended:
+
+- `booking_request_id`: a client-generated idempotency key. Repeating a successful request with the same key returns the original booking rather than creating another patient.
+
+The images are position-sensitive: index 1 must be forward, index 2 left, and index 3 right. The server validates pose, centering, face size, detection confidence, sharpness, and that all three embeddings plausibly belong to the same person before storing them.
 
 Success:
 
@@ -197,6 +206,8 @@ Required fields:
 - `image`: base64 image string, with or without a data URI prefix
 - `target`: `forward`, `left`, or `right`
 
+The returned yaw is adjusted using the backend's camera calibration. `POSE_YAW_SIGN` accepts `-1` or `1`; flip it and restart the backend if the registration camera reports left and right in reverse. API clients do not choose the sign per request.
+
 Success:
 
 ```json
@@ -206,7 +217,7 @@ Success:
   "message": "Hold still.",
   "pose": {
     "pitch": 1.8,
-    "yaw": -18.6,
+    "yaw": -22.5,
     "roll": 2.4
   },
   "quality": {
@@ -282,6 +293,7 @@ Failure:
 | `200` | Request succeeded |
 | `400` | Required fields are missing |
 | `404` | Patient not found or face did not match above the threshold |
+| `413` | Request exceeded the configured size limit |
 | `422` | Image could not be decoded or no face was detected |
 
 ## Confidence Score
@@ -300,12 +312,7 @@ For patients with the standard three angle samples, the backend compares against
 
 The highest score from those vectors becomes that patient's score. The final match is the patient with the highest score above the threshold.
 
-- `0-30%`: very low match
-- `30-60%`: uncertain
-- `60-80%`: likely match
-- `80-100%`: strong match
-
-The default threshold is `0.45`, displayed as `45%` in dashboard calculations. Override it with the `SIMILARITY_THRESHOLD` environment variable when starting the backend.
+This score is cosine similarity expressed as a percentage; it is not a calibrated probability that two images show the same person. The default threshold is `0.45`, displayed as `45%` in dashboard calculations. Tune it with representative data before interpreting results or changing the threshold.
 
 ## Patient Record Shape
 

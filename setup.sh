@@ -8,20 +8,28 @@ echo ""
 # Check Python
 echo "✓ Checking Python..."
 if ! command -v python3 &> /dev/null; then
-    echo "❌ Python 3 not found. Please install Python 3.9+"
+    echo "❌ Python 3 not found. Please install Python 3.10+"
     exit 1
 fi
 PYTHON_VERSION=$(python3 --version | cut -d' ' -f2)
 echo "  Python $PYTHON_VERSION found"
+if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+    echo "❌ Python 3.10 or newer is required"
+    exit 1
+fi
 
 # Check Node
 echo "✓ Checking Node.js..."
 if ! command -v node &> /dev/null; then
-    echo "❌ Node.js not found. Please install Node.js 18+"
+    echo "❌ Node.js not found. Please install a supported Node.js LTS release (22.12+)"
     exit 1
 fi
 NODE_VERSION=$(node --version)
 echo "  Node $NODE_VERSION found"
+if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)'; then
+    echo "❌ Node.js 22.12 or newer is required"
+    exit 1
+fi
 
 # Backend setup
 echo ""
@@ -37,6 +45,7 @@ echo "  Activating virtual environment..."
 source venv/bin/activate 2>/dev/null || . venv/Scripts/activate
 
 echo "  Installing dependencies..."
+python -m pip install --quiet --upgrade "pip>=26.1.2,<27"
 pip install --quiet -r requirements.txt
 
 echo "  ✅ Backend ready"
@@ -47,12 +56,8 @@ echo ""
 echo "📦 Setting up frontend..."
 cd frontend
 
-if [ ! -d "node_modules" ]; then
-    echo "  Installing dependencies..."
-    npm install --quiet
-else
-    echo "  Dependencies already installed"
-fi
+echo "  Installing locked dependencies..."
+npm ci --quiet
 
 echo "  ✅ Frontend ready"
 cd ..

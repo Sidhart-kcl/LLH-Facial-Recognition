@@ -38,7 +38,7 @@ The booking flow:
 1. Collects patient name, doctor, department, and appointment time.
 2. Runs a guided three-angle face scan.
 3. Calls `/book-with-face-set` with the appointment data and exactly three captured face images.
-4. The backend creates the patient only if all three embeddings are extracted successfully.
+4. The backend rechecks the required pose and quality for all three scans, then creates the patient only if every embedding is valid.
 5. Shows the patient ID, appointment ID, and digital token.
 
 ### 3. Face Registration
@@ -52,6 +52,8 @@ The booking UI asks the patient to scan:
 For each angle, the frontend sends preview frames to `/analyze-face-pose`. The backend checks face position, size, pose, detection confidence, and sharpness. When the target pose is stable, the frontend auto-captures the image.
 
 `POST /book-with-face-set` and `POST /register-face-set` require exactly three face images. A registered patient should not have 1, 2, 4, or more face samples.
+
+The booking request also includes a stable `booking_request_id`. This makes development-mode effect replays and network retries idempotent instead of creating duplicate patients.
 
 The required samples are:
 
@@ -106,7 +108,8 @@ Creates an appointment and patient record only after exactly three face images a
   "name": "John Doe",
   "doctor": "Dr. Smith",
   "department": "Cardiology",
-  "appointment_time": "2026-07-20T10:00:00",
+  "appointment_time": "2026-09-20T10:00:00",
+  "booking_request_id": "example-booking-001",
   "images": [
     "data:image/jpeg;base64,...",
     "data:image/jpeg;base64,...",
@@ -232,6 +235,7 @@ The real embedding arrays contain 512 numbers each.
 | --- | --- |
 | Cannot reach server | Confirm the Flask backend is running on port `5050`. |
 | Camera denied | Allow camera access in the browser. |
+| Left/right prompts reversed | Flip backend `POSE_YAW_SIGN` between `-1` and `1`, restart it, and retest that camera. |
 | No face detected | Use a clear image with one visible face. |
 | Face not recognised | Re-register the required three face samples or tune `SIMILARITY_THRESHOLD`. |
 | Dashboard is empty | Add patients through booking or run the demo seeder. |

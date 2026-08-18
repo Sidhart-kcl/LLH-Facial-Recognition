@@ -1,4 +1,4 @@
-FROM node:18-alpine as builder
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 ARG VITE_API_URL=http://localhost:5050
@@ -17,22 +17,14 @@ COPY . .
 RUN npm run build
 
 # Production stage
-FROM node:18-alpine
+FROM nginx:stable-alpine
 
-WORKDIR /app
-
-# Install serve to run the app
-RUN npm install -g serve
-
-# Copy built assets from builder
-COPY --from=builder /app/dist ./dist
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/dist /usr/share/nginx/html
 
 # Expose port
-EXPOSE 5173
+EXPOSE 80
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:5173/ || exit 1
-
-# Start the app
-CMD ["serve", "-s", "dist", "-l", "5173"]
+    CMD wget --no-verbose --tries=1 --spider http://localhost/ || exit 1

@@ -31,8 +31,8 @@ Dates shown to users are formatted as `dd/mm/yyyy, HH:mm`. API input fields and 
 
 ## Prerequisites
 
-- Python 3.9+
-- Node.js 18+ and npm
+- Python 3.10+
+- A supported Node.js LTS release (Node.js 22.12+; Node.js 24 recommended)
 - Webcam for camera capture, or image files for upload testing
 - About 500MB disk space for the InsightFace model
 
@@ -54,7 +54,7 @@ Backend URL: `http://localhost:5050`
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -83,7 +83,8 @@ curl -X POST http://localhost:5050/book-with-face-set \
     "name": "Layla Al Mazrouei",
     "doctor": "Dr. Hana Nasser",
     "department": "Pediatrics",
-    "appointment_time": "2026-07-15T15:00:00",
+    "appointment_time": "2026-09-15T15:00:00",
+    "booking_request_id": "example-booking-001",
     "images": [
       "data:image/jpeg;base64,...",
       "data:image/jpeg;base64,...",
@@ -92,7 +93,7 @@ curl -X POST http://localhost:5050/book-with-face-set \
   }'
 ```
 
-The browser uses `/analyze-face-pose` during registration to auto-capture each angle when the face is centered, large enough, stable, and turned to the requested angle.
+The browser uses `/analyze-face-pose` during registration to auto-capture each angle when the face is centered, large enough, stable, and turned to the requested angle. The final booking and re-registration endpoints repeat those quality and pose checks server-side; three arbitrary images are not accepted as a valid set.
 
 You can also replace the three-scan face set manually for an existing patient:
 
@@ -101,6 +102,8 @@ python scripts/get_embedding.py --patient_id PAT-001 --images forward.jpg left.j
 ```
 
 Face registration requires exactly three samples. The old single-image registration path is disabled.
+
+API clients should send a stable `booking_request_id` for each intended booking. Retrying with the same ID returns the original record instead of creating a duplicate.
 
 ### Check In
 
@@ -204,6 +207,18 @@ SIMILARITY_THRESHOLD=0.45 python face_service.py
 
 Lower values are more permissive. Higher values are stricter. Tune this with your own registration and check-in photos.
 
+The three registration samples must also exceed the pairwise `REGISTRATION_SIMILARITY_THRESHOLD`, defaulting to `0.20`. This prevents a face set assembled from different people. Tune both thresholds with representative data rather than interpreting cosine similarity as a probability.
+
+### Camera Yaw Calibration
+
+`POSE_YAW_SIGN` controls lateral pose interpretation and accepts `-1` or `1`. It defaults to `-1`. Test the guided left and right scans on the registration camera; if the prompts are reversed, restart the backend with the other value:
+
+```bash
+POSE_YAW_SIGN=1 python face_service.py
+```
+
+This is a camera/deployment calibration, so the automated tests work with either value instead of enforcing one sign. A shared backend serving differently oriented cameras requires per-device calibration before production use.
+
 ### CORS Origins
 
 The backend reads allowed frontend origins from `CORS_ORIGINS`, defaulting to `http://localhost:5173`:
@@ -214,6 +229,21 @@ CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 python face_service.py
 
 Add the deployed frontend origin before production use.
 
+### Request Limits
+
+Requests default to 20 MB and each decoded image to 6 MB. Override these with `MAX_REQUEST_BYTES` and `MAX_IMAGE_BYTES` (both in bytes).
+
+`backend/.env.example` documents every supported backend variable. The app reads environment variables from the process; it does not automatically load that file.
+
+## Automated Checks
+
+```bash
+backend/venv/bin/python -m unittest discover -s backend/tests -v
+cd frontend && npm run lint && npm run build
+```
+
+The API tests use a fake face model and temporary JSON files, so they do not load InsightFace or alter local demo data.
+
 ## Troubleshooting
 
 ### Camera access denied
@@ -221,6 +251,11 @@ Add the deployed frontend origin before production use.
 - Allow camera access in the browser.
 - Use `http://localhost` during local development.
 - Use HTTPS for deployed camera access.
+
+### Left and right prompts are reversed
+
+- Stop the backend, change `POSE_YAW_SIGN` from `-1` to `1` or from `1` to `-1`, then restart it.
+- Repeat a complete forward/left/right registration smoke test on that camera.
 
 ### No face detected
 
@@ -274,7 +309,9 @@ project-root/
 - This is fine for demo and small pilot datasets.
 - For thousands of patients with seven match vectors each, move to a vector index such as FAISS, HNSW, or a database with vector search.
 
-## Production Notes
+## Production Readiness
+
+This repository is a local demo, not a production-ready medical or biometric system. The admin and write APIs have no authentication, and the JSON store is intended for one backend process only. Do not expose the service publicly or use real patient data as-is.
 
 Before real deployment:
 

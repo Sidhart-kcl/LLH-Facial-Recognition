@@ -30,6 +30,25 @@ const IconRefresh = () => (
   </svg>
 );
 
+const requestDashboardData = async () => {
+  const [patientsRes, attemptsRes] = await Promise.all([
+    fetch(`${API}/patients`),
+    fetch(`${API}/checkin-attempts`),
+  ]);
+
+  if (!patientsRes.ok) throw new Error('Failed to fetch patients');
+  if (!attemptsRes.ok) throw new Error('Failed to fetch check-in attempts');
+
+  const [patientsData, attemptsData] = await Promise.all([
+    patientsRes.json(),
+    attemptsRes.json(),
+  ]);
+  return {
+    patients: patientsData.patients || [],
+    attempts: attemptsData.attempts || [],
+  };
+};
+
 const parseDate = (value) => {
   if (!value) return null;
   const date = new Date(value);
@@ -245,17 +264,11 @@ const buildMetrics = (patients, attempts) => {
 
 function DrilldownStatCard({ label, value, detail, onClick, active }) {
   return (
-    <div
+    <button
+      type="button"
       className={`admin-stat-card${active ? ' is-active' : ''}`}
-      role="button"
-      tabIndex={0}
+      aria-pressed={active}
       onClick={onClick}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          onClick();
-        }
-      }}
       style={{
         ...styles.statCard,
         ...styles.statAction,
@@ -265,7 +278,7 @@ function DrilldownStatCard({ label, value, detail, onClick, active }) {
       <div style={styles.statLabel}>{label}</div>
       <div style={styles.statValue}>{value}</div>
       {detail && <div style={styles.statPercent}>{detail}</div>}
-    </div>
+    </button>
   );
 }
 
@@ -372,7 +385,7 @@ function AttemptTable({ attempts }) {
 export function AdminDashboard({ onBack }) {
   const [patients, setPatients] = useState([]);
   const [attempts, setAttempts] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeDrilldown, setActiveDrilldown] = useState(null);
 
@@ -471,18 +484,9 @@ export function AdminDashboard({ onBack }) {
     setLoading(true);
     setError(null);
     try {
-      const [patientsRes, attemptsRes] = await Promise.all([
-        fetch(`${API}/patients`),
-        fetch(`${API}/checkin-attempts`),
-      ]);
-
-      if (!patientsRes.ok) throw new Error('Failed to fetch patients');
-      if (!attemptsRes.ok) throw new Error('Failed to fetch check-in attempts');
-
-      const patientsData = await patientsRes.json();
-      const attemptsData = await attemptsRes.json();
-      setPatients(patientsData.patients || []);
-      setAttempts(attemptsData.attempts || []);
+      const data = await requestDashboardData();
+      setPatients(data.patients);
+      setAttempts(data.attempts);
     } catch (err) {
       console.error('Failed to fetch admin dashboard data:', err);
       setError(err.message || 'Failed to fetch admin dashboard data.');
@@ -492,7 +496,22 @@ export function AdminDashboard({ onBack }) {
   };
 
   useEffect(() => {
-    fetchDashboardData();
+    let cancelled = false;
+    requestDashboardData()
+      .then((data) => {
+        if (cancelled) return;
+        setPatients(data.patients);
+        setAttempts(data.attempts);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message || 'Failed to fetch admin dashboard data.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
@@ -757,6 +776,9 @@ const styles = {
   statAction: {
     cursor: 'pointer',
     userSelect: 'none',
+    width: '100%',
+    font: 'inherit',
+    textAlign: 'left',
   },
   statCardActive: {
     borderColor: '#38bdf8',
@@ -871,6 +893,11 @@ const dashboardStyles = `
     box-shadow: none !important;
     outline: none !important;
     outline-offset: 0 !important;
+  }
+  .admin-stat-card:focus-visible {
+    border-color: #38bdf8 !important;
+    box-shadow: 0 0 0 3px rgba(56,189,248,0.3) !important;
+    outline: none !important;
   }
   .admin-stat-card:hover:not(.is-active) {
     background: #111c33 !important;

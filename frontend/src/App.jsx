@@ -3,6 +3,7 @@ import BookingFlow from "./BookingFlow";
 import { AdminDashboard } from "./AdminDashboard";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:5050";
+const MAX_UPLOAD_BYTES = 6 * 1024 * 1024;
 const DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   day: "2-digit",
   month: "2-digit",
@@ -21,7 +22,7 @@ const formatDateTime = (value) => {
 // ── Icons ──────────────────────────────────────────────────────────────────
 const Icon = ({ d, size = 20 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d={d} />
   </svg>
 );
@@ -37,7 +38,7 @@ export default function App() {
       <style>{styles}</style>
       
       {mode === "menu" && <MainMenu onSelectMode={setMode} />}
-      {mode === "booking" && <BookingFlow onComplete={() => setMode("checkin")} />}
+      {mode === "booking" && <BookingFlow onBack={() => setMode("menu")} onComplete={() => setMode("checkin")} />}
       {mode === "checkin" && <CheckInFlow onBack={() => setMode("menu")} />}
       {mode === "admin" && <AdminDashboard onBack={() => setMode("menu")} />}
     </>
@@ -101,7 +102,7 @@ function MainMenu({ onSelectMode }) {
             <ul>
               <li>✅ No paper tokens</li>
               <li>✅ Instant face recognition</li>
-              <li>✅ Secure on-premise storage</li>
+              <li>✅ Local storage for demo data</li>
               <li>✅ Three-angle registration</li>
             </ul>
           </div>
@@ -109,7 +110,7 @@ function MainMenu({ onSelectMode }) {
       </main>
 
       <footer className="menu-footer">
-        Your data stays on premise
+        Demo data is stored by the configured backend
       </footer>
     </div>
   );
@@ -209,38 +210,57 @@ function CameraCheckIn({ onCapture, loading, error, onReset, onBack }) {
   const [uploadErr, setUploadErr] = useState(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const countdownIntervalRef = useRef(null);
 
   useEffect(() => {
     let stream;
+    let cancelled = false;
     (async () => {
+      setStreaming(false);
+      setCamErr(null);
       if (mode !== "camera") return;
 
       try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error("Camera API unavailable");
+        }
         stream = await navigator.mediaDevices.getUserMedia({
           video: { width: 640, height: 480, facingMode: "user" },
         });
-        if (videoRef.current) {
+        if (!cancelled && videoRef.current) {
           videoRef.current.srcObject = stream;
           setStreaming(true);
+        } else {
+          stream.getTracks().forEach(track => track.stop());
         }
-      } catch (e) {
-        setCamErr("Camera access denied.");
+      } catch {
+        if (!cancelled) setCamErr("Camera is unavailable or access was denied.");
       }
     })();
-    return () => stream?.getTracks().forEach(t => t.stop());
+    return () => {
+      cancelled = true;
+      stream?.getTracks().forEach(t => t.stop());
+    };
   }, [mode]);
+
+  useEffect(() => () => clearInterval(countdownIntervalRef.current), []);
 
   const capture = () => {
     if (!streaming) return;
     let c = 3;
     setCountdown(c);
-    const iv = setInterval(() => {
+    countdownIntervalRef.current = setInterval(() => {
       c -= 1;
       if (c > 0) { setCountdown(c); return; }
-      clearInterval(iv);
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
       setCountdown(null);
       const canvas = canvasRef.current;
       const video = videoRef.current;
+      if (!canvas || !video || !video.videoWidth || !video.videoHeight) {
+        setCamErr("The camera frame is not ready. Please try again.");
+        return;
+      }
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       canvas.getContext("2d").drawImage(video, 0, 0);
@@ -257,6 +277,10 @@ function CameraCheckIn({ onCapture, loading, error, onReset, onBack }) {
     if (!file) return;
     if (!file.type.startsWith("image/")) {
       setUploadErr("Please upload an image file.");
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setUploadErr("Please choose an image smaller than 6 MB.");
       return;
     }
 
@@ -350,7 +374,7 @@ function CameraCheckIn({ onCapture, loading, error, onReset, onBack }) {
           )}
 
           {error && (
-            <div className="error-bar">
+            <div className="error-bar" role="alert">
               <span>{error}</span>
               <button className="btn-retry" onClick={onReset}>Retry</button>
             </div>
@@ -364,11 +388,17 @@ function CameraCheckIn({ onCapture, loading, error, onReset, onBack }) {
 // ── Token Display Card ─────────────────────────────────────────────────────
 function TokenCard({ result, onReset, onBack }) {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
 
-  const copy = () => {
-    navigator.clipboard.writeText(result.token);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(result.token);
+      setCopyError(false);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopyError(true);
+    }
   };
 
   return (
@@ -380,10 +410,10 @@ function TokenCard({ result, onReset, onBack }) {
 
       <main className="token-main">
         <div className="token-card">
-          <div className="token-badge" onClick={copy} title="Click to copy">
+          <button type="button" className="token-badge" onClick={copy} title="Copy token">
             <span className="token-value">{result.token}</span>
-            <span className="copy-hint">{copied ? "Copied!" : "Click to copy"}</span>
-          </div>
+            <span className="copy-hint">{copyError ? "Copy failed" : copied ? "Copied!" : "Click to copy"}</span>
+          </button>
 
           <div className="patient-info">
             <div className="info-section">
@@ -419,16 +449,6 @@ function TokenCard({ result, onReset, onBack }) {
               <span className="confidence-value">{result.confidence}%</span>
             </div>
 
-            {/* TEMP TESTING: remove this block when angle/average match debugging is done. */}
-            {result.match_label && (
-              <div className="match-debug">
-                <span>Testing match detail:</span>
-                <span className="match-debug-value">
-                  {result.match_label.replaceAll("_", " ")}
-                  {result.match_type ? ` (${result.match_type.replaceAll("_", " ")})` : ""}
-                </span>
-              </div>
-            )}
           </div>
 
           <button className="btn-reset" onClick={onReset}>Scan Another Face</button>
@@ -898,6 +918,7 @@ const styles = `
   }
 
   .token-badge {
+    width: 100%;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -985,27 +1006,6 @@ const styles = `
     color: #22c55e;
     font-weight: 700;
     font-size: 14px;
-  }
-
-  /* TEMP TESTING: remove with the match_label block in CheckInResult. */
-  .match-debug {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 12px;
-    background: rgba(56, 189, 248, 0.1);
-    border: 1px dashed rgba(56, 189, 248, 0.35);
-    border-radius: 8px;
-    color: #93c5fd;
-    font-size: 12px;
-    margin-top: 10px;
-  }
-
-  .match-debug-value {
-    color: #bfdbfe;
-    font-weight: 700;
-    text-align: right;
-    text-transform: capitalize;
   }
 
   .btn-reset {

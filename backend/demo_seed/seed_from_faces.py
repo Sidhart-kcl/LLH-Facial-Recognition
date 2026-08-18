@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import shutil
@@ -55,6 +56,7 @@ DOCTORS = [
 ]
 DEMO_SOURCE = "demo_seed"
 SIMILARITY_THRESHOLD = 0.45
+REGISTRATION_SIMILARITY_THRESHOLD = float(os.getenv("REGISTRATION_SIMILARITY_THRESHOLD", "0.20"))
 
 
 @dataclass(frozen=True)
@@ -92,24 +94,35 @@ def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 
     if isinstance(data, list):
         if "patients" in default:
-            return {"patients": data}
-        if "attempts" in default:
-            return {"attempts": data}
+            data = {"patients": data}
+        elif "attempts" in default:
+            data = {"attempts": data}
+
+    root_key = next(iter(default))
+    if not isinstance(data, dict) or not isinstance(data.get(root_key), list):
+        raise ValueError(f"{path} must contain a '{root_key}' list.")
 
     return data
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        json.dump(data, f, indent=2)
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def backup(path: Path) -> Path | None:
     if not path.exists():
         return None
 
-    stamp = local_now().strftime("%d%m%Y-%H%M%S")
+    stamp = local_now().strftime("%d%m%Y-%H%M%S-%f")
     backup_path = path.with_suffix(path.suffix + f".bak-{stamp}")
     shutil.copy2(path, backup_path)
     return backup_path
@@ -181,7 +194,11 @@ def discover_subjects(faces_dir: Path) -> list[Subject]:
 def load_face_model():
     from insightface.app import FaceAnalysis
 
-    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+    app = FaceAnalysis(
+        name=os.getenv("FACE_MODEL", "buffalo_l"),
+        root=os.path.expanduser(os.getenv("INSIGHTFACE_HOME", "~/.insightface")),
+        providers=["CPUExecutionProvider"],
+    )
     app.prepare(ctx_id=0, det_size=(640, 640))
     return app
 
@@ -200,12 +217,8 @@ def extract_embedding(face_app, image_path: Path) -> list[float] | None:
         return None
 
     if len(faces) > 1:
-        print(f"Multiple faces detected, using largest face: {image_path}")
-        faces = sorted(
-            faces,
-            key=lambda face: (face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]),
-            reverse=True,
-        )
+        print(f"Multiple faces detected; exactly one is required: {image_path}")
+        return None
 
     return faces[0].normed_embedding.tolist()
 
@@ -226,7 +239,7 @@ def create_patient(subject: Subject, embeddings: list[list[float]], now: datetim
     )
     lead_days = 2 + (subject.seed_index % 14)
     created_at = appointment_time - timedelta(days=lead_days)
-    appointment_id = f"APT-2026-DEMO-{subject.seed_index:04d}"
+    appointment_id = f"APT-{appointment_time.year}-DEMO-{subject.seed_index:04d}"
     token = f"TKN-{uuid.uuid5(uuid.NAMESPACE_DNS, subject.patient_id).hex[:8].upper()}"
 
     return {
@@ -245,6 +258,13 @@ def create_patient(subject: Subject, embeddings: list[list[float]], now: datetim
         "source": DEMO_SOURCE,
         "demo_image_count": len(subject.image_paths),
     }
+
+
+def face_set_pair_scores(embeddings: list[list[float]]) -> list[float]:
+    return [
+        sum(a * b for a, b in zip(embeddings[first], embeddings[second]))
+        for first, second in ((0, 1), (0, 2), (1, 2))
+    ]
 
 
 def create_attempt(
@@ -381,6 +401,14 @@ def build_demo_patients(subjects: list[Subject], now: datetime) -> list[dict[str
             )
             continue
 
+        pair_scores = face_set_pair_scores(embeddings)
+        if min(pair_scores) < REGISTRATION_SIMILARITY_THRESHOLD:
+            print(
+                f"Skipping {subject.patient_id}: face samples are inconsistent "
+                f"({', '.join(f'{score:.3f}' for score in pair_scores)})"
+            )
+            continue
+
         patients.append(create_patient(subject, embeddings, now))
         print(
             f"{subject.patient_id}: {subject.name} "
@@ -488,6 +516,17 @@ def seed(args: argparse.Namespace) -> int:
         print(f"Cleared previous seeded data before seeding ({removed_patients} patients, {removed_attempts} attempts).")
 
     demo_patients = build_demo_patients(subjects, now)
+
+    existing_ids = {patient.get("patient_id") for patient in patients_db["patients"]}
+    collisions = sorted(
+        patient["patient_id"]
+        for patient in demo_patients
+        if patient["patient_id"] in existing_ids
+    )
+    if collisions:
+        print(f"Cannot seed because patient IDs already exist: {', '.join(collisions)}")
+        print("Rename the face folders, remove the conflicting records, or use --reset-all.")
+        return 1
 
     demo_attempts = [] if args.skip_attempts else create_demo_attempts(demo_patients, now)
 
